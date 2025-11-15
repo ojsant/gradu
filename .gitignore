@@ -1,3 +1,7 @@
 /data
+/plots
 *.txt
 SEP_PADs-and-Anisotropy.ipynb
+/coverages
+*.png
+*.log
