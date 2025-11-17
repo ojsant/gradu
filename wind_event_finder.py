@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
+import subprocess
 
 from scipy.ndimage import gaussian_filter1d
 from pyonset import Onset, BootstrapWindow
@@ -25,8 +26,11 @@ def check_for_gaps(data, start, end, max_gap=1):
 data_path = f"{os.getcwd()}{os.sep}data"
 csv_path = f"{os.getcwd()}{os.sep}wind_events.csv"
 
-for d in range(14):
-    date = pd.to_datetime("2023-02-20") + pd.Timedelta(days=d)
+rc = subprocess.call(["./download.sh", "l1", "2023"])
+
+for d in range(365):
+    
+    date = pd.to_datetime("2023-1-1") + pd.Timedelta(days=d)
     logging.info(f"Analyzing flux for {date}")
     start = date - pd.Timedelta(days=1)
     end = date + pd.Timedelta(days=2)    # off by one, so three days are loaded now
@@ -93,7 +97,7 @@ for d in range(14):
                 
                 n += 1
 
-            except AttributeError:
+            except ValueError:
                 logging.info(f"Sufficient minimum ({opt1}) and maximum ({opt2}) were identified, but no onset was found")
 
     logging.info(f"Analysis for {date} finished, {n} onsets found")

@@ -78,6 +78,7 @@ if __name__ == "__main__":
 
             X1, Y1, solo_cov = convert_to_bool_coverage(df_cov, sc="SolO")
 
+            # NOTE: should it instead be N random coverages from a single day? Traning set could be arbitrarily abundant 
             # Split day in half to generate two 12 hour coverages
             if len(solo_cov) >= 24 * 60:
                 cov1 = solo_cov[:12*60,:]
