@@ -5,3 +5,4 @@ SEP_PADs-and-Anisotropy.ipynb
 /coverages
 *.png
 *.log
+*:Zone.Identifier
