@@ -1,5 +1,6 @@
-from anisotropy import run_SEPevent, select_sc_inst, print_available_channels
-from solo_epd_loader import epd_load, resample_df, get_available_soar_files
+# TODO 2.12. check for empty data files
+
+from solo_epd_loader import epd_load
 
 import numpy as np
 import os
@@ -47,7 +48,7 @@ if __name__ == "__main__":
 
     try:
         start = int(sys.argv[1])
-    except IndexError:
+    except (IndexError, ValueError):
         start = 0
     logging.info(f"Run start: {start}")
 
@@ -78,7 +79,6 @@ if __name__ == "__main__":
 
             X1, Y1, solo_cov = convert_to_bool_coverage(df_cov, sc="SolO")
 
-            # NOTE: should it instead be N random coverages from a single day? Traning set could be arbitrarily abundant 
             # Split day in half to generate two 12 hour coverages
             if len(solo_cov) >= 24 * 60:
                 cov1 = solo_cov[:12*60,:]

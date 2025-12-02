@@ -1,8 +1,8 @@
 /data
 /plots
-*.txt
-SEP_PADs-and-Anisotropy.ipynb
 /coverages
+/anisotropy
 *.png
 *.log
 *:Zone.Identifier
+*.csv
