@@ -55,7 +55,7 @@ if __name__ == "__main__":
     
     for i in range(start, max_days):
         logging.info(f"Day {i}")
-        save_path = os.getcwd() + os.sep + "coverages" + os.sep + sc + os.sep
+        save_path = os.getcwd() + os.sep + "coverages_" + os.sep + sc + os.sep
         os.makedirs(save_path, exist_ok=True)
         date = SOLO_START + dt.timedelta(days=i)
         logging.info(f"Forming SolO coverages from date {date}")

@@ -19,3 +19,5 @@ stixdcpy
 sunpy
 sunpy_soar
 
+scikit-learn
+
