@@ -1,8 +1,7 @@
-/data
-/plots
-/coverages
-/anisotropy
+*.npy
 *.png
 *.log
 *:Zone.Identifier
+/pad_imputation/__pycache__
+/anisotropy
 
