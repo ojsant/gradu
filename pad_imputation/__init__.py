@@ -12,6 +12,7 @@ from anisotropy import run_SEPevent
 
 @dataclass(frozen=True)
 class SoloConstants:
+    name: str = "SolO"
     sectors: list[str] = field(default_factory=lambda: ["sun", "asun", "north", "south"])
     mission_start: dt.datetime = dt.datetime(2021, 1, 1)
     mission_end: dt.datetime = dt.datetime(2025, 5, 31)
@@ -22,14 +23,34 @@ class SoloConstants:
 
 @dataclass(frozen=True)
 class WindConstants:
+    name: str = "Wind"
     sectors: list[str] = field(default_factory=lambda: [f"P{i}" for i in range(8)])
     mission_start: dt.datetime = dt.datetime(2005, 1, 1)
     mission_end: dt.datetime = dt.datetime(2025, 5, 31)
     native_cadence: str = "12s"
 
 
-def coverage_overlap(cov1, cov2):   # TODO handle mismatch (remove from coverage with higher amount of timestamps) (this is due to timestamp-based indexing)
-    return cov1 & cov2
+# TODO: there still needs to be a better way to handle shape mismatches.
+def coverage_overlap(cov1, cov2):  
+    """AND mask two coverage arrays to find where they overlap. If there's length mismatch, shorten the longer one.
+    1st return is the overlapping coverage, 2nd is the shortened one. If no mismatch, 2nd return is the 1st coverage.
+
+    Args:
+        cov1 (np.array): 1st coverage
+        cov2 (np.array): 2nd coverage
+
+    Returns:
+        array: overlapping coverage
+        array: reshaped coverage
+    """
+    mismatch = cov2.shape[0] - cov1.shape[0]
+    # 
+    if mismatch > 0:
+        reshaped_cov2 = cov2[:len(cov2)-mismatch]
+        return cov1 & reshaped_cov2, reshaped_cov2
+    else:
+        reshaped_cov1 = cov1[:len(cov1)-mismatch]
+        return cov2 & reshaped_cov1, reshaped_cov1
 
 
 def intensity_histogram(sc, I_data, coverage, bin_width):
@@ -52,15 +73,15 @@ def intensity_histogram(sc, I_data, coverage, bin_width):
         intensity_per_sector = intensity[:,i]
         cov_arr = coverage[direction].to_numpy()
         cov_finite = coverage[direction].notna().to_numpy()
-        av_flux = np.where(cov_finite[:,1], intensity_per_sector, np.nan)  
+        av_flux = np.where(cov_finite[:,1], intensity_per_sector, np.nan)
         new_hist = np.where(((Y > cov_arr[:,0]) & (Y < cov_arr[:,2])), av_flux, 0)
-        hist = hist + new_hist    
+        hist = hist + new_hist
         hist_counts = hist_counts + np.where(new_hist > 0, 1, 0)   # Overlapping bins are calculated as averages
 
     hist = hist / hist_counts
     hist = np.where(hist > 0, hist, np.nan)
 
-    return hist
+    return hist.T       # The indices flip somewhere?? Take the transpose for (time, angle) shape
 
 
 def convert_to_bool_coverage(cov, sc, bin_width_deg=1):
@@ -80,15 +101,15 @@ def convert_to_bool_coverage(cov, sc, bin_width_deg=1):
 
 def load_random_file(path):
     r_file = np.random.choice(os.listdir(path)).tolist()
-    return np.load(path + os.sep + r_file)
+    return np.load(path / r_file)
 
 
-def load_wind_event(remove_peaks=False, n_lim=2, *args, **kwargs):
+def load_wind_event(*args, remove_peaks=False, n_lim=2, **kwargs):
     wind_event = run_SEPevent(*args, **kwargs)
     if remove_peaks:
         wind_event.wind_peak_removal(n_lim=n_lim)
     return wind_event
 
-
-solo = SoloConstants()
-wind = WindConstants()
+# default dataclasses
+SOLO = SoloConstants()
+WIND = WindConstants()
