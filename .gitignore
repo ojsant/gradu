@@ -1,11 +1,12 @@
 *.npy
 *.png
 *.log
-*:Zone.Identifier
-/pad_imputation/__pycache__
+*.cdf
+__pycache__
 /anisotropy
 /data/datafiles
 /data/models
 /anisotropy/channels_Wind_3DP_e.csv
-*.cdf
+
+
 

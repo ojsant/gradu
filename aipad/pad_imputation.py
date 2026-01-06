@@ -1,37 +1,17 @@
 import numpy as np
+import typing
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import datetime as dt
 import copy
 
-from dataclasses import dataclass, field
 from pathlib import Path
 from anisotropy import run_SEPevent
 
 
-@dataclass(frozen=True)
-class SoloConstants:
-    name: str = "SolO"
-    sectors: list[str] = field(default_factory=lambda: ["sun", "asun", "north", "south"])
-    mission_start: dt.datetime = dt.datetime(2021, 1, 1)
-    mission_end: dt.datetime = dt.datetime(2025, 5, 31)
-    native_cadence: str = "1min"
-    pitch_angle_mu_columns: list[str] = field(default_factory=lambda: [f"Pitch_Angle_{dir}" for dir in ["S", "A", "N", "D"]])
-    pitch_angle_sigma_columns: list[str] = field(default_factory=lambda: [f"Pitch_Angle_Sigma_{dir}" for dir in ["S", "A", "N", "D"]])
-
-
-@dataclass(frozen=True)
-class WindConstants:
-    name: str = "Wind"
-    sectors: list[str] = field(default_factory=lambda: [f"P{i}" for i in range(8)])
-    mission_start: dt.datetime = dt.datetime(2005, 1, 1)
-    mission_end: dt.datetime = dt.datetime(2025, 5, 31)
-    native_cadence: str = "12s"
-
-
 # TODO: there still needs to be a better way to handle shape mismatches.
-def coverage_overlap(cov1, cov2):  
+def coverage_overlap(cov1: pd.DataFrame, cov2: pd.DataFrame):  
     """AND mask two coverage arrays to find where they overlap. If there's length mismatch, shorten the longer one.
     1st return is the overlapping coverage, 2nd is the shortened one. If no mismatch, 2nd return is the 1st coverage.
 
@@ -53,7 +33,7 @@ def coverage_overlap(cov1, cov2):
         return cov2 & reshaped_cov1, reshaped_cov1
 
 
-def intensity_histogram(sc, I_data, coverage, bin_width):
+def intensity_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bin_width: int) -> np.ndarray:
     """
     Code partly adapted from SOLER anisotropy tools SEPEvent.overview_plot() method (maintained by Jan Gieseler)
     https://github.com/soler-he/sep_tools/tree/main/anisotropy commit 7567a98
@@ -99,7 +79,7 @@ def convert_to_bool_coverage(cov, sc, bin_width_deg=1):
     return X, Y, cov_arr
 
 
-def load_random_file(path):
+def load_random_file(path: Path):
     r_file = np.random.choice(os.listdir(path)).tolist()
     return np.load(path / r_file)
 
@@ -110,6 +90,4 @@ def load_wind_event(*args, remove_peaks=False, n_lim=2, **kwargs):
         wind_event.wind_peak_removal(n_lim=n_lim)
     return wind_event
 
-# default dataclasses
-SOLO = SoloConstants()
-WIND = WindConstants()
+
