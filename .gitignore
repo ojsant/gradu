@@ -1,4 +1,5 @@
 *.npy
+*.npz
 *.png
 *.log
 *.cdf

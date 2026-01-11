@@ -33,7 +33,7 @@ def coverage_overlap(cov1: pd.DataFrame, cov2: pd.DataFrame):
         return cov2 & reshaped_cov1, reshaped_cov1
 
 
-def intensity_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bin_width: int) -> np.ndarray:
+def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bin_width: int) -> np.ndarray:
     """
     Code partly adapted from SOLER anisotropy tools SEPEvent.overview_plot() method (maintained by Jan Gieseler)
     https://github.com/soler-he/sep_tools/tree/main/anisotropy commit 7567a98
