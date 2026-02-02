@@ -109,22 +109,22 @@ def read_npzs(load_path):
     intensity_list = []
     metadata = []
 
-    # TODO handle metadata
-
     for file in load_path.iterdir():
-        try:
-            npz = np.load(file)
-            hist = npz["full"]
-            reduced_hist = npz["reduced"]
-            intensity = npz["intensity_data"]
-            hist_list.append(hist)
-            reduced_hist_list.append(reduced_hist)
-            intensity_list.append(intensity)
-            metadata.append(str(file))
+        npz = np.load(file)
+        hist = npz["full"]
+        reduced_hist = npz["reduced"]
+        intensity = npz["intensity_data"]
+        # ts = npz["times"]
+        hist_list.append(hist)
+        reduced_hist_list.append(reduced_hist)
+        intensity_list.append(intensity)
 
-        except ValueError:
-            print(traceback.format_exc())
-            continue
+        sc, onset_dt, time_avg, bin_width = file.name.removesuffix(".npz").split("_")
+        meta_dict = {
+            "spacecraft": sc, "onset_datetime": onset_dt,  # "time_index": ts,
+            "time_avg_min": time_avg, "bin_width_deg": bin_width
+            }
+        metadata.append(meta_dict)
 
     hist_arr = np.array(hist_list)
     reduced_hist_arr = np.array(reduced_hist_list)
@@ -134,11 +134,13 @@ def read_npzs(load_path):
     return hist_arr, reduced_hist_arr, intensity_arr, metadata_arr
 
 
-def make_train_test(*args, n=3):
-    """Form a train-test split by taking every nth item to the test set.
+def make_train_test(*args, n=3, shift=0):
+    """Form a train-test split by taking every nth item to the test set. Shift parameter controls
+    which of the n samples is taken.
 
     Args:
-        n (int, optional):
+        n (int, optional): how manyth sample is taken to the test set, default=3
+        shift (int, optional): add to modulo operation for different splits, default=0
     """
     rets = []
     n_tot = len(args[0])
@@ -147,8 +149,8 @@ def make_train_test(*args, n=3):
         if len(arg) != n_tot:
             raise ValueError("Arguments not equal-length")
 
-        test = arg[ind % 3 == 0]
-        train = arg[ind % 3 != 0]
+        test = arg[(ind + shift) % 3 == 0]
+        train = arg[(ind + shift) % 3 != 0]
         rets.append(train)
         rets.append(test)
 
@@ -161,9 +163,9 @@ def form_test_matrices(model: _BaseImputer, X_test: np.ndarray,
     test = y_test
     reduced = np.where(np.isfinite(test), true, np.nan)
     if isinstance(model, KNNImputer):
-        # reduced_reshaped = reduced.reshape((144,900))
-        pred_full = model.transform(reduced)
-        # pred_full = pred_full_reshaped.reshape((720,180))
+        reduced_reshaped = reduced.reshape((144, 900))
+        pred_full_reshaped = model.transform(reduced_reshaped)
+        pred_full = pred_full_reshaped.reshape((720, 180))
 
     elif isinstance(model, SimpleImputer) or isinstance(model, IterativeImputer):
         if transpose:
@@ -181,40 +183,50 @@ def form_test_matrices(model: _BaseImputer, X_test: np.ndarray,
     return [true, reduced, pred_full, pred, target]
 
 
-def calculate_scores(model: _BaseImputer, res: list) -> list:
-    pred = res[3]
-    target = res[4]
+def calculate_scores(target: np.ndarray, pred: np.ndarray, score: str) -> float:
+    """Calculate either coefficient of determination or mean square error
+    as score between prediction and target.
 
-    if isinstance(model, KNNImputer):
-        pred = pred.reshape((144, 900))
-        target = target.reshape((144, 900))
+    Args:
+        model (_BaseImputer): KNNImputer, SimpleImputer, IterativeImputer
+        true (np.ndarray): target values
+        pred (np.ndarray): predicted values
+        score (str): "r2" or "mse"
 
-    scores = []
-    mse_scores = []
-    for i, _ in enumerate(pred):
-        if np.any(np.isfinite(target[i])) and np.any(np.isfinite(pred[i])):
-            scores.append(r2_score(
-                target[i][np.isfinite(target[i])], pred[i][np.isfinite(pred[i])]
+    Returns:
+        float
+    """
+
+    pred = pred.flatten()
+    target = target.flatten()
+
+    if np.any(np.isfinite(target)) and np.any(np.isfinite(pred)):
+        if score == "r2":
+            return r2_score(
+                target[np.isfinite(target)], pred[np.isfinite(pred)]
                 )
-            )
-            mse_scores.append(-mean_squared_error(
-                target[i][np.isfinite(target[i])], pred[i][np.isfinite(pred[i])]
+
+        elif score == "mse":
+            return mean_squared_error(
+                target[np.isfinite(target)], pred[np.isfinite(pred)]
                 )
-            )
-        else:
-            scores.append(np.nan)
-            mse_scores.append(np.nan)
-
-    return [scores, mse_scores]
 
 
-def plot_results(model: _BaseImputer, res: list, intensities: np.ndarray,
-                 sc: WindConstants, cov_sc: SoloConstants, transpose=True,
+def plot_results(model: _BaseImputer, res: list, score: str, intensities: np.ndarray,
+                 sc: WindConstants, cov_sc: SoloConstants,
                  save_plot=True, save_path=None) -> None:
 
-    scores, mse_scores = calculate_scores(model, res)
-
     true, reduced, pred_full, pred, target = res
+
+    # Calculate score over time
+    scores = []
+    for tr, pr in zip(target, pred):
+        pred_score = calculate_scores(tr, pr, score)
+        scores.append(pred_score)
+
+    # Score over whole 12 hrs
+    total_score = calculate_scores(target, pred, score)
+
     true_miss_percent = np.sum(np.where(np.isnan(true), 1, 0)) \
         / (true.shape[0] * true.shape[1]) * 100
     reduced_miss_percent = np.sum(np.where(np.isnan(reduced), 1, 0)) \
@@ -262,19 +274,11 @@ def plot_results(model: _BaseImputer, res: list, intensities: np.ndarray,
                        borderpad=0.2)
     fig.colorbar(mesh, cax=axins, orientation="vertical")
 
-    if isinstance(model, KNNImputer):
-        axs[7].plot(np.arange(0, 720, 5), scores)
-        axs[7].set_title("R2 score per 5 x 180 block")
-
-        axs[8].plot(np.arange(0, 720, 5), mse_scores)
-        axs[8].set_title("Negative MSE score per 5 x 180 block")
-
-    else:
-        axs[7].plot(np.arange(0, 720, 1), scores)
-        axs[7].set_title("R2 score")
-
-        axs[8].plot(np.arange(0, 720, 1), mse_scores)
-        axs[8].set_title("Negative MSE score")
+    axs[7].plot(np.arange(0, 720, 1), scores)
+    if score == "r2":
+        axs[7].set_title(f"R2 score: (total = {total_score})")
+    elif score == "mse":
+        axs[7].set_title(f"MSE score: (total = {total_score})")
 
     if save_plot:
         plt.savefig(save_path)
@@ -282,3 +286,18 @@ def plot_results(model: _BaseImputer, res: list, intensities: np.ndarray,
 
     else:
         plt.show()
+
+
+def save_results(model, res, meta, scorer, path) -> None:
+
+    reduced, pred, target = res[2], res[3], res[4]
+    score = calculate_scores(target, pred, scorer)
+    reduced_miss_percent = np.sum(np.where(np.isnan(reduced), 1, 0)) \
+        / (reduced.shape[0] * reduced.shape[1]) * 100
+    try:
+        df = pd.read_csv(path)
+    except FileNotFoundError:
+        df = pd.DataFrame(columns=["event_dt", "missing", "score"])
+
+    df = pd.concat([df, pd.Series([meta["onset_dt"], reduced_miss_percent, score, scorer])])
+    df.to_csv(path)
