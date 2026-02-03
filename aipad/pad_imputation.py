@@ -288,16 +288,26 @@ def plot_results(model: _BaseImputer, res: list, score: str, intensities: np.nda
         plt.show()
 
 
-def save_results(model, res, meta, scorer, path) -> None:
+def save_results(model, res, meta, scorer, path) -> pd.DataFrame:
 
-    reduced, pred, target = res[2], res[3], res[4]
+    reduced, pred, target = res[1], res[3], res[4]
     score = calculate_scores(target, pred, scorer)
     reduced_miss_percent = np.sum(np.where(np.isnan(reduced), 1, 0)) \
         / (reduced.shape[0] * reduced.shape[1]) * 100
+    cols = ["event_dt", "miss_percent", "score", "scorer", "model_params"]
+
     try:
         df = pd.read_csv(path)
     except FileNotFoundError:
-        df = pd.DataFrame(columns=["event_dt", "missing", "score"])
+        df = pd.DataFrame(columns=cols)
 
-    df = pd.concat([df, pd.Series([meta["onset_dt"], reduced_miss_percent, score, scorer])])
-    df.to_csv(path)
+    row = [pd.to_datetime(meta["onset_datetime"], format="%Y%m%d-%H%M%S"),
+           reduced_miss_percent, score, scorer, (model.n_neighbors, model.weights)]
+
+    df.loc[-1] = row
+    df.index = df.index + 1
+    df = df.sort_index()
+
+    df.to_csv(path, index=False)
+
+    return df
