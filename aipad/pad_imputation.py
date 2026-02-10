@@ -9,7 +9,7 @@ from pathlib import Path
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import KNNImputer, IterativeImputer, SimpleImputer
 from sklearn.impute._base import _BaseImputer
-from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.metrics import r2_score, root_mean_squared_error
 from matplotlib.colors import LogNorm
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
@@ -134,7 +134,7 @@ def read_npzs(load_path):
     return hist_arr, reduced_hist_arr, intensity_arr, metadata_arr
 
 
-def make_train_test(*args, n=3, shift=0):
+def make_train_test(*args, n=3, shift=0) -> list:
     """Form a train-test split by taking every nth item to the test set. Shift parameter controls
     which of the n samples is taken.
 
@@ -183,6 +183,22 @@ def form_test_matrices(model: _BaseImputer, X_test: np.ndarray,
     return [true, reduced, pred_full, pred, target]
 
 
+def mean_rebinning(*args, bin_width_deg=22.5) -> list:
+    ret = []
+    for data in args:
+        nbins = int(180 / bin_width_deg)
+        binned_data = np.zeros(shape=(data.shape[0], nbins))
+        for i in range(nbins):
+            starting_bin = int(i * bin_width_deg)
+            ending_bin = int((i + 1) * bin_width_deg)
+            data_in_bin = data[:, starting_bin:ending_bin]
+            mean_data = np.nanmean(data_in_bin, axis=1)
+            binned_data[:, i] = mean_data
+        ret.append(binned_data)
+
+    return ret
+
+
 def calculate_scores(target: np.ndarray, pred: np.ndarray, score: str) -> float:
     """Calculate either coefficient of determination or mean square error
     as score between prediction and target.
@@ -191,7 +207,7 @@ def calculate_scores(target: np.ndarray, pred: np.ndarray, score: str) -> float:
         model (_BaseImputer): KNNImputer, SimpleImputer, IterativeImputer
         true (np.ndarray): target values
         pred (np.ndarray): predicted values
-        score (str): "r2" or "mse"
+        score (str): "r2" or "rmse"
 
     Returns:
         float
@@ -206,8 +222,8 @@ def calculate_scores(target: np.ndarray, pred: np.ndarray, score: str) -> float:
                 target[np.isfinite(target)], pred[np.isfinite(pred)]
                 )
 
-        elif score == "mse":
-            return mean_squared_error(
+        elif score == "rmse":
+            return root_mean_squared_error(
                 target[np.isfinite(target)], pred[np.isfinite(pred)]
                 )
 
@@ -232,12 +248,12 @@ def plot_results(model: _BaseImputer, res: list, score: str, intensities: np.nda
     reduced_miss_percent = np.sum(np.where(np.isnan(reduced), 1, 0)) \
         / (reduced.shape[0] * reduced.shape[1]) * 100
 
-    fig, axs = plt.subplots(nrows=9, figsize=(16, 36), sharex=True)
-
     X, Y = np.meshgrid(np.arange(0, true.shape[0]), np.arange(0, true.shape[1]), indexing="ij")
 
     norm = LogNorm(np.nanmin(true), np.nanmax(true))
     diff_norm = LogNorm(1e-3, 1e3)
+
+    fig, axs = plt.subplots(nrows=8, figsize=(16, 32), sharex=True)
 
     for i in range(8):
         axs[0].plot(intensities[:, i], label=sc.sectors[i])
@@ -277,8 +293,8 @@ def plot_results(model: _BaseImputer, res: list, score: str, intensities: np.nda
     axs[7].plot(np.arange(0, 720, 1), scores)
     if score == "r2":
         axs[7].set_title(f"R2 score: (total = {total_score})")
-    elif score == "mse":
-        axs[7].set_title(f"MSE score: (total = {total_score})")
+    elif score == "rmse":
+        axs[7].set_title(f"RMSE score: (total = {total_score})")
 
     if save_plot:
         plt.savefig(save_path)
