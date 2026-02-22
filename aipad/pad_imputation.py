@@ -4,6 +4,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import copy
 import traceback
+import h5py
+import glob
 
 from pathlib import Path
 from sklearn.experimental import enable_iterative_imputer
@@ -103,10 +105,36 @@ def load_wind_event(*args, remove_peaks=False, n_lim=2, **kwargs):
     return wind_event
 
 
-def read_npzs(load_path):
+def read_hdf5(load_path):
+    """Author: Juho Lankinen (jumila@utu.fi)
+
+    Args:
+        load_path (_type_): _description_
+    """
+    # Create a h5-file for the data. If you want to append, use "a" in h5py.File()
+
+    npz_files = glob.glob("./data/intensities/1min_1deg/*.npz")
+
+    with h5py.File("wind_1min_1deg.h5", "w") as h5file:
+        for i, filename in enumerate(npz_files):
+            data = np.load(filename)
+            root_name = Path(filename).name[:-14]  # Keys will be the filenames without 1min_1deg.npz ending.
+            group = h5file.create_group(root_name)
+
+            for key in ["full", "reduced", "intensity_data"]:
+                group.create_dataset(key, data=data[key], compression='gzip')
+
+    # Load the full dataset
+    wind_h5 = "wind_1min_1deg.h5"
     hist_list = []
     reduced_hist_list = []
     intensity_list = []
+
+    with h5py.File(wind_h5, "r") as file:
+        for k in file.keys():
+            hist_list.append(file[k]["full"][:])
+            reduced_hist_list.append(file[k]["reduced"][:])
+            intensity_list.append(file[k]["intensity_data"][:])
     metadata = []
 
     for file in load_path.iterdir():
