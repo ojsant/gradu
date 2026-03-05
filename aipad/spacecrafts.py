@@ -18,6 +18,7 @@ class SoloConstants:
     pitch_angle_sigma_columns: list[str] = field(
         default_factory=lambda: [f"Pitch_Angle_Sigma_{dir}" for dir in ["S", "A", "N", "D"]]
         )
+    bin_width_deg: float = 30.0
 
 
 @dataclass
@@ -27,3 +28,4 @@ class WindConstants:
     mission_start: dt.datetime = dt.datetime(2005, 1, 1)
     mission_end: dt.datetime = dt.datetime(2025, 12, 31)
     native_cadence: str = "12s"
+    bin_width_deg: float = 22.5

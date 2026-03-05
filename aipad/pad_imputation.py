@@ -3,13 +3,9 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import copy
-import traceback
-import h5py
-import glob
 
 from pathlib import Path
-from sklearn.experimental import enable_iterative_imputer
-from sklearn.impute import KNNImputer, IterativeImputer, SimpleImputer
+from sklearn.impute import KNNImputer, SimpleImputer
 from sklearn.impute._base import _BaseImputer
 from sklearn.metrics import r2_score, root_mean_squared_error
 from matplotlib.colors import LogNorm
@@ -43,7 +39,8 @@ def coverage_overlap(cov1: pd.DataFrame, cov2: pd.DataFrame):
         return cov2 & reshaped_cov1, reshaped_cov1
 
 
-def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bin_width: int) -> np.ndarray:
+def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bins: int) -> \
+        tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Code partly adapted from SOLER anisotropy tools SEPEvent.overview_plot()
     method (maintained by Jan Gieseler)
@@ -52,7 +49,9 @@ def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bin_width: int
     intensity = copy.copy(I_data)
     sectors = sc.sectors
 
-    X, Y = np.meshgrid(coverage.index.values, np.linspace(0, 180, int(180 / bin_width)))
+    # Working with "wrong" indexing since NumPy broadcasting rules are funky
+    X, Y = np.meshgrid(coverage.index.values,
+                       np.linspace(0.5*180/bins, (bins-0.5)*180/bins, bins))
     hist = np.zeros(np.shape(X))
     hist_counts = np.zeros(np.shape(X))
 
@@ -65,21 +64,21 @@ def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bin_width: int
         cov_arr = coverage[direction].to_numpy()
         cov_finite = coverage[direction].notna().to_numpy()
         av_flux = np.where(cov_finite[:, 1], intensity_per_sector, np.nan)
-        new_hist = np.where(((Y > cov_arr[:, 0]) & (Y < cov_arr[:, 2])), av_flux, 0)
+        new_hist = np.where((Y > cov_arr[:, 0]) & (Y < cov_arr[:, 2]), av_flux, 0)
         hist = hist + new_hist
         hist_counts = hist_counts + np.where(new_hist > 0, 1, 0)   # Overlapping bins as averages
 
     hist = hist / hist_counts
     hist = np.where(hist > 0, hist, np.nan)
 
-    return hist.T       # The indices flip somewhere?? Take the transpose for (time, angle) shape
+    return X.T, Y.T, hist.T
 
 
-def convert_to_bool_coverage(cov, sc, bin_width_deg=1):
+def convert_to_bool_coverage(cov, sc, bins=8):
     directions = sc.sectors
 
     X, Y = np.meshgrid(cov.index.values,
-                       np.linspace(0, 180, int(180 / bin_width_deg)),
+                       np.linspace(0.5*180/bins, (bins-0.5)*180/bins, bins),
                        indexing="ij")
     cov_arr = np.zeros_like(Y, dtype=np.bool_)
 
@@ -93,6 +92,20 @@ def convert_to_bool_coverage(cov, sc, bin_width_deg=1):
     return X, Y, cov_arr
 
 
+def induce_missingness(cov: pd.DataFrame, p: float) -> tuple[pd.DataFrame, np.ndarray]:
+    """Set a percentage of given coverage as missing. Returns a copy of the coverage array without
+    the randomly picked values and the missingness mask.
+
+    Args:
+        cov (pd.DataFrame): coverage with columns ("min", "center", "max") for each sector
+        p (float): proportion of data to set as missing
+    """
+    mask = np.random.choice([False, True], size=(cov.shape[0], cov.shape[1] // 3), p=[1-p, p])
+    mask = np.repeat(mask, 3, axis=1)
+    masked_cov = cov.where(~mask, np.nan)    # DataFrame.where() replaces where condition is False
+    return masked_cov, mask
+
+
 def load_random_file(path: Path):
     r_file = np.random.choice(os.listdir(path)).tolist()
     return np.load(path / r_file)
@@ -103,63 +116,6 @@ def load_wind_event(*args, remove_peaks=False, n_lim=2, **kwargs):
     if remove_peaks:
         wind_event.wind_peak_removal(n_lim=n_lim)
     return wind_event
-
-
-def read_hdf5(load_path):
-    """Author: Juho Lankinen (jumila@utu.fi)
-
-    Args:
-        load_path (_type_): _description_
-    """
-    # Create a h5-file for the data. If you want to append, use "a" in h5py.File()
-
-    npz_files = glob.glob("./data/intensities/1min_1deg/*.npz")
-
-    with h5py.File("wind_1min_1deg.h5", "w") as h5file:
-        for i, filename in enumerate(npz_files):
-            data = np.load(filename)
-            root_name = Path(filename).name[:-14]  # Keys will be the filenames without 1min_1deg.npz ending.
-            group = h5file.create_group(root_name)
-
-            for key in ["full", "reduced", "intensity_data"]:
-                group.create_dataset(key, data=data[key], compression='gzip')
-
-    # Load the full dataset
-    wind_h5 = "wind_1min_1deg.h5"
-    hist_list = []
-    reduced_hist_list = []
-    intensity_list = []
-
-    with h5py.File(wind_h5, "r") as file:
-        for k in file.keys():
-            hist_list.append(file[k]["full"][:])
-            reduced_hist_list.append(file[k]["reduced"][:])
-            intensity_list.append(file[k]["intensity_data"][:])
-    metadata = []
-
-    for file in load_path.iterdir():
-        npz = np.load(file)
-        hist = npz["full"]
-        reduced_hist = npz["reduced"]
-        intensity = npz["intensity_data"]
-        # ts = npz["times"]
-        hist_list.append(hist)
-        reduced_hist_list.append(reduced_hist)
-        intensity_list.append(intensity)
-
-        sc, onset_dt, time_avg, bin_width = file.name.removesuffix(".npz").split("_")
-        meta_dict = {
-            "spacecraft": sc, "onset_datetime": onset_dt,  # "time_index": ts,
-            "time_avg_min": time_avg, "bin_width_deg": bin_width
-            }
-        metadata.append(meta_dict)
-
-    hist_arr = np.array(hist_list)
-    reduced_hist_arr = np.array(reduced_hist_list)
-    intensity_arr = np.array(intensity_list)
-    metadata_arr = np.array(metadata)
-
-    return hist_arr, reduced_hist_arr, intensity_arr, metadata_arr
 
 
 def make_train_test(*args, n=3, shift=0) -> list:
@@ -195,7 +151,7 @@ def form_test_matrices(model: _BaseImputer, X_test: np.ndarray,
         pred_full_reshaped = model.transform(reduced_reshaped)
         pred_full = pred_full_reshaped.reshape((720, 180))
 
-    elif isinstance(model, SimpleImputer) or isinstance(model, IterativeImputer):
+    elif isinstance(model, SimpleImputer):
         if transpose:
             pred_full = model.fit_transform(reduced.T).T
         else:
@@ -209,22 +165,6 @@ def form_test_matrices(model: _BaseImputer, X_test: np.ndarray,
     target = np.where(np.isfinite(pred), true, np.nan)
 
     return [true, reduced, pred_full, pred, target]
-
-
-def mean_rebinning(*args, bin_width_deg=22.5) -> list:
-    ret = []
-    for data in args:
-        nbins = int(180 / bin_width_deg)
-        binned_data = np.zeros(shape=(data.shape[0], nbins))
-        for i in range(nbins):
-            starting_bin = int(i * bin_width_deg)
-            ending_bin = int((i + 1) * bin_width_deg)
-            data_in_bin = data[:, starting_bin:ending_bin]
-            mean_data = np.nanmean(data_in_bin, axis=1)
-            binned_data[:, i] = mean_data
-        ret.append(binned_data)
-
-    return ret
 
 
 def calculate_scores(target: np.ndarray, pred: np.ndarray, score: str) -> float:
@@ -290,7 +230,7 @@ def plot_results(model: _BaseImputer, res: list, score: str, intensities: np.nda
     axs[0].legend(loc="upper right")
 
     axs[1].pcolormesh(X, Y, true, norm=norm, cmap="inferno")
-    axs[1].set_title(f"WIND PAD, {true_miss_percent:.2f} % missing")
+    axs[1].set_title(f"WIND PAD, total {true_miss_percent:.2f} % missing")
 
     axs[2].pcolormesh(X, Y, reduced, norm=norm, cmap="inferno")
     axs[2].set_title(f"WIND PAD w/ reduction, {reduced_miss_percent:.2f} % missing")
@@ -300,8 +240,6 @@ def plot_results(model: _BaseImputer, res: list, score: str, intensities: np.nda
         axs[3].set_title(f"k-NN imputed values, k = {model.get_params()["n_neighbors"]}")
     elif isinstance(model, SimpleImputer):
         axs[3].set_title("Mean imputed values")
-    elif isinstance(model, IterativeImputer):
-        axs[3].set_title(f"Iteratively imputed values with {model.estimator}")
 
     axs[4].pcolormesh(X, Y, pred, norm=norm, cmap="inferno")
     axs[4].set_title("Predicted values")
@@ -319,10 +257,8 @@ def plot_results(model: _BaseImputer, res: list, score: str, intensities: np.nda
     fig.colorbar(mesh, cax=axins, orientation="vertical")
 
     axs[7].plot(np.arange(0, 720, 1), scores)
-    if score == "r2":
-        axs[7].set_title(f"R2 score: (total = {total_score})")
-    elif score == "rmse":
-        axs[7].set_title(f"RMSE score: (total = {total_score})")
+
+    axs[7].set_title(f"RMSE score: (total = {total_score})")
 
     if save_plot:
         plt.savefig(save_path)
