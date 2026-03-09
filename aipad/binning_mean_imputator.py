@@ -2,82 +2,50 @@ import warnings
 from typing import Literal
 
 import numpy as np
+import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.impute import SimpleImputer
 
+class PADImputator(BaseEstimator, TransformerMixin):
 
-class BinningImputator(BaseEstimator, TransformerMixin):
-
-    def __init__(self, method: Literal["angular", "temporal"] = "angular", bins: int = 8):
+    def __init__(self, method: Literal["mean", "fill_average", "interp"] = "mean",
+                 bins: int = 8, axis: int = 1):
         self.method = method
         self.bins = bins
+        self.axis = axis
 
         self._strategy_map = {
-            "angular": self._angular_finder,
-            "temporal": self._temporal_finder
+            "mean": self._mean_finder,
+            "fill_average": self._fill_average_finder,
+            "interp": self._interp_finder,
+            "knn": self._knn_finder
             }
 
-    def _angular_finder(self, bin_means: np.ndarray) -> np.ndarray:
-        """
-        Fully vectorized angular nearest-bin fill.
-        For each row, fill NaN bins using the nearest non-empty bin in that row.
-        """
-        n_rows, n_bins = bin_means.shape
-        filled = bin_means.copy()
+    def _mean_finder(self, a, axis):
+        imputer = SimpleImputer(strategy="mean", keep_empty_features=True)
+        if axis == 0:
+            return imputer.fit_transform(a)
+        elif axis == 1:  # SimpleImputer only fills with column statistics
+            return imputer.fit_transform(a.T).T
+        else:
+            raise ValueError("Axis must either be 0 or 1")
 
-        # Mask of valid bins
-        valid = ~np.isnan(bin_means)
-        # Rows with at least one valid bin
-        rows_with_data = np.where(valid.any(axis=1))[0]
-        # Precompute angular distance matrix (n_bins x n_bins)
-        bin_idx = np.arange(n_bins)
-        dist_matrix = np.abs(bin_idx[:, None] - bin_idx[None, :])  # dist[i,j] = |i-j|
+    def _fill_average_finder(self, a, axis):
+        return ((pd.DataFrame(a).ffill(axis=axis)
+                 + pd.DataFrame(a).bfill(axis=axis)) / 2).interpolate(axis=axis, limit_direction="both").to_numpy()
 
-        for r in rows_with_data:
-            row_valid = valid[r]
-            if row_valid.all():
-                continue  # no NaNs in this row
-            nan_bins = np.where(~row_valid)[0]   # bins that are NaN
-            valid_bins = np.where(row_valid)[0]  # bins that have data
-            # Compute distances from each NaN bin to valid bins
-            distances = dist_matrix[nan_bins[:, None], valid_bins[None, :]]
-            # Find nearest valid bin for each NaN
-            nearest_idx = valid_bins[np.argmin(distances, axis=1)]
-            # Fill the NaNs
-            filled[r, nan_bins] = filled[r, nearest_idx]
+    def _interp_finder(self, a, axis):
+        return (pd.DataFrame(a).interpolate(axis=axis, limit_direction="both")).to_numpy()
 
-        return filled
-
-    def _temporal_finder(self, bin_means: np.ndarray) -> np.ndarray:
-        """
-        Fully vectorized temporal nearest-bin fill along rows (time) per bin.
-        Forward-fill missing values using the last valid row for each bin.
-        """
-        n_rows, n_bins = bin_means.shape
-
-        # Mask of valid values
-        valid_mask = ~np.isnan(bin_means)
-        # Create an array of indices for each row
-        row_idx = np.arange(n_rows)[:, None]  # shape (n_rows, 1)
-        # Replace NaN indices with -1 for cumulative max trick
-        last_valid_idx = np.where(valid_mask, row_idx, -1)
-        # Forward-fill last valid index along rows
-        last_valid_idx_ff = np.maximum.accumulate(last_valid_idx, axis=0)
-        # Build the filled array by indexing into bin_means
-        # For rows where there is no previous valid (-1), remain NaN
-        filled = np.where(
-            last_valid_idx_ff >= 0,
-            bin_means[last_valid_idx_ff, np.arange(n_bins)],
-            np.nan
-        )
-
-        return filled
+    def _knn_finder(self, a, axis):
+        pass
 
     def fit(self, X: np.ndarray, y: np.ndarray | None = None):
         return self
 
     def transform(self, X: np.ndarray):
         """
-        Impute missing values in pitch-angle data using bin means.
+        Impute missing values in pitch-angle data.
 
         Parameters
         ----------
@@ -90,33 +58,13 @@ class BinningImputator(BaseEstimator, TransformerMixin):
             Array with missing values imputed.
         """
         X = np.array(X, copy=True)
-        n_rows, n_cols = X.shape
 
-        # Step 1 — Split columns into bins
-        col_bins = np.array_split(np.arange(n_cols), self.bins)
-
-        # Step 2 — Compute initial bin means per row
-        bin_means = np.full((n_rows, self.bins), np.nan)
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="Mean of empty slice")
-            for i, cols in enumerate(col_bins):
-                bin_means[:, i] = np.nanmean(X[:, cols], axis=1)
-
-        # Step 3 — Fill empty bins
+        # Impute with given strategy
         if self.method not in self._strategy_map:
             raise ValueError(f"Method must be one of {list(self._strategy_map.keys())}")
-        bin_means_filled = self._strategy_map[self.method](bin_means)
+        X_imputed = self._strategy_map[self.method](X, axis=self.axis)
 
-        # Step 4 — Fill the original array using bin_means_filled
-        arr_imputed = X.copy()
-        for i, cols in enumerate(col_bins):
-            arr_imputed[:, cols] = np.where(
-                np.isnan(arr_imputed[:, cols]),
-                bin_means_filled[:, i][:, None],
-                arr_imputed[:, cols]
-            )
-
-        return arr_imputed
+        return X_imputed
 
 
 def select_true_points(data_array: np.ndarray, size_pct: float, seed: int | None = None)\

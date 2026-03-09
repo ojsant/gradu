@@ -181,8 +181,8 @@ def calculate_scores(target: np.ndarray, pred: np.ndarray, score: str) -> float:
         float
     """
 
-    pred = pred.flatten()
-    target = target.flatten()
+    pred = pred.ravel()
+    target = target.ravel()
 
     if np.any(np.isfinite(target)) and np.any(np.isfinite(pred)):
         if score == "r2":

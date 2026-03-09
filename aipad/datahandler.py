@@ -6,6 +6,7 @@ import h5py
 import glob
 import numpy as np
 from pathlib import Path
+from itertools import product
 
 
 class WindDataHandler:
@@ -37,20 +38,20 @@ class WindDataHandler:
                 group.create_dataset(key, data=arrays[key], compression='gzip')
 
     @classmethod
-    def load_file(cls, filename: str):
-        hist_list = []
-        reduced_hist_list = []
-        intensity_list = []
-        meta_list = []
+    def load_file(cls, filename: str) -> dict:
+        d = {}
+        keys = ["full", "intensities", "times"] \
+            + [f"reduced_{p:.1f}" for p in np.arange(1, 6) / 10] \
+            + [f"reduced_{p:.1f}_mask" for p in np.arange(1, 6) / 10]
+        
+        for key in keys:
+            d[key] = []
 
         with h5py.File(filename, "r") as file:
-            for k in file.keys():
-                hist_list.append(file[k]["full"][:])
-                reduced_hist_list.append(file[k]["reduced"][:])
-                intensity_list.append(file[k]["intensity_data"][:])
-                meta_list.append(k.split("_")[1])  # for now only pass the onset datetime
+            for k1, k2 in product(file.keys(), keys):
+                d[k2].append(file[k1][k2][:])
 
-        return np.array(hist_list), np.array(reduced_hist_list), np.array(intensity_list), np.array(meta_list)
+        return d
 
 
 if __name__ == '__main__':
