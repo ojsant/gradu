@@ -1,3 +1,6 @@
+# TODO 9.3. move imputation related functions to padimputer and
+# preprocessing related to preprocessing
+
 import numpy as np
 import os
 import pandas as pd
@@ -91,8 +94,8 @@ def convert_to_bool_coverage(cov, sc, bins=8):
 
     return X, Y, cov_arr
 
-
-def induce_missingness(cov: pd.DataFrame, p: float) -> tuple[pd.DataFrame, np.ndarray]:
+# TODO: RNG seeding
+def induce_missingness(cov: pd.DataFrame, p: float, seed: int=123) -> tuple[pd.DataFrame, np.ndarray]:
     """Set a percentage of given coverage as missing. Returns a copy of the coverage array without
     the randomly picked values and the missingness mask.
 
@@ -100,7 +103,8 @@ def induce_missingness(cov: pd.DataFrame, p: float) -> tuple[pd.DataFrame, np.nd
         cov (pd.DataFrame): coverage with columns ("min", "center", "max") for each sector
         p (float): proportion of data to set as missing
     """
-    mask = np.random.choice([False, True], size=(cov.shape[0], cov.shape[1] // 3), p=[1-p, p])
+    random = np.random.default_rng(seed)
+    mask = random.choice([False, True], size=(cov.shape[0], cov.shape[1] // 3), p=[1-p, p])
     mask = np.repeat(mask, 3, axis=1)
     masked_cov = cov.where(~mask, np.nan)    # DataFrame.where() replaces where condition is False
     return masked_cov, mask
