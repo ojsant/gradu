@@ -42,8 +42,8 @@ def coverage_overlap(cov1: pd.DataFrame, cov2: pd.DataFrame):
         return cov2 & reshaped_cov1, reshaped_cov1
 
 
-def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bins: int) -> \
-        tuple[np.ndarray, np.ndarray, np.ndarray]:
+def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bins: int) \
+        -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Code partly adapted from SOLER anisotropy tools SEPEvent.overview_plot()
     method (maintained by Jan Gieseler)
@@ -94,8 +94,9 @@ def convert_to_bool_coverage(cov, sc, bins=8):
 
     return X, Y, cov_arr
 
-# TODO: RNG seeding
-def induce_missingness(cov: pd.DataFrame, p: float, seed: int=123) -> tuple[pd.DataFrame, np.ndarray]:
+
+def induce_missingness(cov: pd.DataFrame, p: float, seed: int = 123) \
+        -> tuple[pd.DataFrame, np.ndarray]:
     """Set a percentage of given coverage as missing. Returns a copy of the coverage array without
     the randomly picked values and the missingness mask.
 
@@ -155,12 +156,6 @@ def form_test_matrices(model: _BaseImputer, X_test: np.ndarray,
         pred_full_reshaped = model.transform(reduced_reshaped)
         pred_full = pred_full_reshaped.reshape((720, 180))
 
-    elif isinstance(model, SimpleImputer):
-        if transpose:
-            pred_full = model.fit_transform(reduced.T).T
-        else:
-            pred_full = model.fit_transform(reduced)
-
     pred = np.where((np.isnan(reduced)
                     & np.isfinite(true)
                     & np.meshgrid(np.isfinite(reduced).any(axis=1), np.arange(0, reduced.shape[1]),
@@ -198,6 +193,11 @@ def calculate_scores(target: np.ndarray, pred: np.ndarray, score: str) -> float:
             return root_mean_squared_error(
                 target[np.isfinite(target)], pred[np.isfinite(pred)]
                 )
+
+        else:
+            raise ValueError("Give a valid score!")
+    else:
+        return 0.0
 
 
 def plot_results(model: _BaseImputer, res: list, score: str, intensities: np.ndarray,
