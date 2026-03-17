@@ -8,6 +8,6 @@ __pycache__
 /data/datafiles
 /data/models
 /anisotropy/channels_Wind_3DP_e.csv
-
+/rmse_random_sampling
 
 

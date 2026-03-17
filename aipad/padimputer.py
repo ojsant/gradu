@@ -50,9 +50,9 @@ class PADImputer(BaseEstimator, TransformerMixin):
     def _knn_finder(self, a, axis):
         imputer = KNNImputer(n_neighbors=self._knn_neighbors, weights=self._knn_weigth,
                              keep_empty_features=True)
-        if axis == 1:
+        if axis == 0:
             return imputer.fit_transform(a)
-        elif axis == 0:
+        elif axis == 1:
             return imputer.fit_transform(a.T).T
         else:
             raise ValueError("Axis must either be 0 or 1")
