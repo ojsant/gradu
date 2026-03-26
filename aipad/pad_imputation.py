@@ -7,12 +7,14 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import copy
 
+from os import PathLike
 from pathlib import Path
 from sklearn.impute import KNNImputer, SimpleImputer
 from sklearn.impute._base import _BaseImputer
 from sklearn.metrics import r2_score, root_mean_squared_error
 from matplotlib.colors import LogNorm
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+from numpy.typing import NDArray
 
 from anisotropy import run_SEPevent
 from aipad.spacecrafts import SoloConstants, WindConstants
@@ -114,7 +116,7 @@ def induce_missingness(cov: pd.DataFrame, p: float, seed: int = 0) \
     return masked_cov, mask
 
 
-def load_random_file(path: Path):
+def load_random_file(path: PathLike):
     r_file = np.random.choice(os.listdir(path)).tolist()
     return np.load(path / r_file)
 
@@ -135,22 +137,25 @@ def make_train_test(*args, n=3, shift=0) -> list:
         shift (int, optional): add to modulo operation for different splits, default=0
     """
     rets = []
+
     n_tot = len(args[0])
-    ind = np.arange(0, n_tot, 1)
-    for arg in args:
+    for i, arg in enumerate(args):
         if len(arg) != n_tot:
             raise ValueError("Arguments not equal-length")
-
-        test = arg[(ind + shift) % 3 == 0]
-        train = arg[(ind + shift) % 3 != 0]
-        rets.append(train)
-        rets.append(test)
-
+        trains = []
+        tests = []
+        for j, item in enumerate(arg):
+            if (j + shift) % 3 == 0:
+                tests.append(item)
+            else:
+                trains.append(item)
+        rets.append(trains)
+        rets.append(tests)
     return rets
 
 
-def form_test_matrices(model: _BaseImputer, X_test: np.ndarray,
-                       y_test: np.ndarray, transpose=False) -> list:
+def form_test_matrices(model: _BaseImputer, X_test: NDArray,
+                       y_test: np.ndarray) -> list:
     true = X_test
     test = y_test
     reduced = np.where(np.isfinite(test), true, np.nan)
@@ -205,7 +210,7 @@ def calculate_scores(target: np.ndarray, pred: np.ndarray, score: str) -> float:
 
 def plot_results(model: _BaseImputer, res: list, score: str, intensities: np.ndarray,
                  sc: WindConstants, cov_sc: SoloConstants,
-                 save_plot=True, save_path=None) -> None:
+                 save_plot=True, save_path: PathLike = Path(".")) -> None:
 
     true, reduced, pred_full, pred, target = res
 

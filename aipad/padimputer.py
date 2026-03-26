@@ -1,8 +1,8 @@
-import warnings
-from typing import Literal
-
 import numpy as np
 import pandas as pd
+
+from numpy.typing import NDArray
+from typing import Literal
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer, KNNImputer
 
@@ -31,7 +31,7 @@ class PADImputer(BaseEstimator, TransformerMixin):
         self.predicted = None
         self.target = None
 
-    def _mean_finder(self, a, axis):
+    def _mean_finder(self, a: NDArray, axis: Literal[0, 1]):
         imputer = SimpleImputer(strategy="mean", keep_empty_features=True)
         if axis == 0:
             return imputer.fit_transform(a)
@@ -40,14 +40,14 @@ class PADImputer(BaseEstimator, TransformerMixin):
         else:
             raise ValueError("Axis must either be 0 or 1")
 
-    def _fill_average_finder(self, a, axis):
+    def _fill_average_finder(self, a: NDArray, axis: Literal[0, 1]):
         fill_av = ((pd.DataFrame(a).ffill(axis=axis) + pd.DataFrame(a).bfill(axis=axis)) / 2)
         return fill_av.interpolate(axis=axis, limit_direction="both").to_numpy()
 
-    def _interp_finder(self, a, axis):
+    def _interp_finder(self, a: NDArray, axis: Literal[0, 1]):
         return (pd.DataFrame(a).interpolate(axis=axis, limit_direction="both")).to_numpy()
 
-    def _knn_finder(self, a, axis):
+    def _knn_finder(self, a: NDArray, axis: Literal[0, 1]):
         imputer = KNNImputer(n_neighbors=self._knn_neighbors, weights=self._knn_weigth,
                              keep_empty_features=True)
         if axis == 0:
@@ -62,14 +62,13 @@ class PADImputer(BaseEstimator, TransformerMixin):
 
     @classmethod    # class or instance?
     def target_from_prediction(cls, true, reduced, imputed):
-        pass
-        # pred = np.where((np.isnan(reduced)
-        #                 & np.isfinite(true)
-        #                 & np.meshgrid(np.isfinite(reduced).any(axis=1), np.arange(0, reduced.shape[1]),
-        #                                 indexing="ij")[0]),
-        #                 imputed, np.nan)
-        # target = np.where(np.isfinite(pred), true, np.nan)
-        # return target, pred
+        pred = np.where((np.isnan(reduced)
+                        & np.isfinite(true)
+                        & np.meshgrid(np.isfinite(reduced).any(axis=1), np.arange(0, reduced.shape[1]),
+                                        indexing="ij")[0]),
+                        imputed, np.nan)
+        target = np.where(np.isfinite(pred), true, np.nan)
+        return target, pred
 
     @classmethod
     def calc_scores(cls, target, pred):
@@ -78,10 +77,10 @@ class PADImputer(BaseEstimator, TransformerMixin):
     def plot_results(self):
         pass
 
-    def fit(self, X: np.ndarray, y: np.ndarray | None = None):
+    def fit(self, X: NDArray, y: NDArray | None = None):
         return self
 
-    def transform(self, X: np.ndarray):
+    def transform(self, X: NDArray):
         """
         Impute missing values in pitch-angle data.
 
