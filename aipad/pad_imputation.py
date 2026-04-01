@@ -6,14 +6,15 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import copy
+import gc
 
 from os import PathLike
-from pathlib import Path
-from sklearn.impute import KNNImputer, SimpleImputer
+from sklearn.impute import KNNImputer
 from sklearn.impute._base import _BaseImputer
 from sklearn.metrics import r2_score, root_mean_squared_error
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, Normalize
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+from matplotlib.dates import HourLocator, DateFormatter
 from numpy.typing import NDArray
 
 from anisotropy import run_SEPevent
@@ -208,17 +209,58 @@ def calculate_scores(target: np.ndarray, pred: np.ndarray, score: str) -> float:
         return 0.0
 
 
-def plot_results(model: _BaseImputer, res: list, score: str, intensities: np.ndarray,
+def convert_timestamps(attrs):
+    """Convert Epoch timestamps to NumPy datetime."""
+    epoch = attrs["Epoch"]
+    t_unit = attrs["t_unit"]
+    return epoch.astype(f"datetime64[{t_unit}]")
+
+
+def load_event_data(hdf, event_name, sc):
+    """Load datasets and attributes for a given event."""
+    event_group = hdf[event_name]
+
+    # Load datasets
+    intensity_attrs = dict(event_group["Intensity"].attrs)
+    intensity_attrs["Epoch"] = convert_timestamps(intensity_attrs)
+    intensity = pd.DataFrame(event_group["Intensity"][:], index=intensity_attrs["Epoch"],
+                             columns=sc.sectors)
+
+    mag_field_attrs = dict(event_group["MagField"].attrs)
+    mag_field_attrs["Epoch"] = convert_timestamps(mag_field_attrs)
+    mag_field = pd.DataFrame(event_group["MagField"][:], index=mag_field_attrs["Epoch"],
+                             columns=["Bx", "By", "Bz", "B"])
+
+    ind = pd.MultiIndex.from_product([sc.sectors, ["min", "center", "max"]])
+    coverage_attrs = dict(event_group["Coverage"].attrs)
+    coverage_attrs["Epoch"] = convert_timestamps(coverage_attrs)
+    coverage = pd.DataFrame(event_group["Coverage"][:], index=coverage_attrs["Epoch"], columns=ind)
+
+    return {
+        "Intensity": intensity,
+        "MagField": mag_field,
+        "Coverage": coverage,
+        "Intensity_attrs": intensity_attrs,
+        "MagField_attrs": mag_field_attrs,
+        "Coverage_attrs": coverage_attrs
+    }
+
+
+def target_from_prediction(true, reduced, imputed):
+    pred = np.where((np.isnan(reduced)
+                    & np.isfinite(true)
+                    & np.meshgrid(np.isfinite(reduced).any(axis=1), np.arange(0, reduced.shape[1]),
+                                  indexing="ij")[0]),
+                    imputed, np.nan)
+    target = np.where(np.isfinite(pred), true, np.nan)
+    return target, pred
+
+
+def plot_results(pa, I_data, B_data, true, reduced, imputed, score: str,
                  sc: WindConstants, cov_sc: SoloConstants,
-                 save_plot=True, save_path: PathLike = Path(".")) -> None:
+                 save_plot=True, save_path=None) -> None:
 
-    true, reduced, pred_full, pred, target = res
-
-    # Calculate score over time
-    scores = []
-    for tr, pr in zip(target, pred):
-        pred_score = calculate_scores(tr, pr, score)
-        scores.append(pred_score)
+    target, pred = target_from_prediction(true, reduced, imputed)
 
     # Score over whole 12 hrs
     total_score = calculate_scores(target, pred, score)
@@ -228,53 +270,81 @@ def plot_results(model: _BaseImputer, res: list, score: str, intensities: np.nda
     reduced_miss_percent = np.sum(np.where(np.isnan(reduced), 1, 0)) \
         / (reduced.shape[0] * reduced.shape[1]) * 100
 
-    X, Y = np.meshgrid(np.arange(0, true.shape[0]), np.arange(0, true.shape[1]), indexing="ij")
+    X, Y = np.meshgrid(I_data.index.values, pa, indexing="ij")
+
+    diff = target - pred
 
     norm = LogNorm(np.nanmin(true), np.nanmax(true))
-    diff_norm = LogNorm(1e-3, 1e3)
 
     fig, axs = plt.subplots(nrows=8, figsize=(16, 32), sharex=True)
 
-    for i in range(8):
-        axs[0].plot(intensities[:, i], label=sc.sectors[i])
-    axs[0].set_title("Intensities")
-    axs[0].set_yscale("log")
+    for b in range(B_data.values.shape[1]):
+        axs[0].plot(B_data.index.values, B_data.iloc[:, b], label=B_data.columns[b])
+
+    for i in range(I_data.shape[1]):
+        axs[1].plot(I_data.index.values, I_data.iloc[:, i], label=sc.sectors[i])
+
     axs[0].legend(loc="upper right")
+    axs[0].set_ylabel("B [nT]")
+    axs[0].xaxis.set_major_locator(HourLocator(range(24)))
+    axs[0].xaxis.set_major_formatter(DateFormatter("%d %b\n%H:%M"))
+    axs[0].set_title("Magnetic field (GSE coordinates)")
 
-    axs[1].pcolormesh(X, Y, true, norm=norm, cmap="inferno")
-    axs[1].set_title(f"WIND PAD, total {true_miss_percent:.2f} % missing")
+    axs[1].set_yscale("log")
+    axs[1].legend(loc="upper right")
+    axs[1].set_ylabel(r"I $[\mathrm{(cm^2\ s\ sr\ MeV)^{-1}}]$")
+    axs[1].set_title("Intensities")
 
-    axs[2].pcolormesh(X, Y, reduced, norm=norm, cmap="inferno")
-    axs[2].set_title(f"WIND PAD w/ reduction, {reduced_miss_percent:.2f} % missing")
+    int_mesh = axs[2].pcolormesh(X, Y, true, norm=norm, cmap="inferno")
+    axs[2].set_title(f"{sc.name.upper()} PAD, total {true_miss_percent:.2f} % missing")
+    axs[2].set_yticks(np.linspace(0, 180, 9))
+    axs[2].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
-    axs[3].pcolormesh(X, Y, pred_full, norm=norm, cmap="inferno")
-    if isinstance(model, KNNImputer):
-        axs[3].set_title(f"k-NN imputed values, k = {model.get_params()["n_neighbors"]}")
-    elif isinstance(model, SimpleImputer):
-        axs[3].set_title("Mean imputed values")
+    axs[3].pcolormesh(X, Y, reduced, norm=norm, cmap="inferno")
+    axs[3].set_title(f"{sc.name.upper()} PAD w/ reduction, {reduced_miss_percent:.2f} % missing")
+    axs[3].set_yticks(np.linspace(0, 180, 9))
+    axs[3].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
-    axs[4].pcolormesh(X, Y, pred, norm=norm, cmap="inferno")
-    axs[4].set_title("Predicted values")
+    axs[4].pcolormesh(X, Y, imputed, norm=norm, cmap="inferno")
+    axs[4].set_title("Imputed values")
+    axs[4].set_yticks(np.linspace(0, 180, 9))
+    axs[4].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
-    axs[5].pcolormesh(X, Y, target, norm=norm, cmap="inferno")
-    axs[5].set_title("Target values")
+    axs[5].pcolormesh(X, Y, pred, norm=norm, cmap="inferno")
+    axs[5].set_title("Predicted values")
+    axs[5].set_yticks(np.linspace(0, 180, 9))
+    axs[5].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
-    diff = np.abs(target - pred)
+    axs[6].pcolormesh(X, Y, target, norm=norm, cmap="inferno")
+    axs[6].set_title(f"Target values (RMSE = {total_score})")
+    axs[6].set_yticks(np.linspace(0, 180, 9))
+    axs[6].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
-    mesh = axs[6].pcolormesh(X, Y, diff, norm=diff_norm)
-    axs[6].set_title("Absolute difference")
-    axins = inset_axes(axs[6], width="100%", height="100%", loc="center",
-                       bbox_to_anchor=(1.01, 0, 0.03, 1), bbox_transform=axs[6].transAxes,
+    log_data = np.sign(diff) * np.log10(np.abs(diff) + 1e-10)  # Add small offset to avoid log(0)
+    vmax = np.nanmax(np.log10(np.abs(diff) + 1e-10))
+    vmin = -vmax
+    diff_mesh = axs[7].pcolormesh(X, Y, log_data, norm=Normalize(vmin=vmin, vmax=vmax),
+                             cmap="bwr")
+    axs[7].set_title(r"log|target - prediction| (signed)")
+    axins1 = inset_axes(axs[2], width="100%", height="100%", loc="center",
+                       bbox_to_anchor=(1.01, 0, 0.03, 1), bbox_transform=axs[2].transAxes,
                        borderpad=0.2)
-    fig.colorbar(mesh, cax=axins, orientation="vertical")
+    axins2 = inset_axes(axs[7], width="100%", height="100%", loc="center",
+                       bbox_to_anchor=(1.01, 0, 0.03, 1), bbox_transform=axs[7].transAxes,
+                       borderpad=0.2)
+    fig.colorbar(int_mesh, cax=axins1, ax=axs[2])
+    fig.colorbar(diff_mesh, cax=axins2, ax=axs[7])
+    axs[7].set_yticks(np.linspace(0, 180, 9))
+    axs[7].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
+    axs[7].set_xlabel(f"Date (in {I_data.index[0].strftime("%Y")})")
 
-    axs[7].plot(np.arange(0, 720, 1), scores)
-
-    axs[7].set_title(f"RMSE score: (total = {total_score})")
-
+    axs[0].set_xlim((I_data.index[0], I_data.index[-1]))
     if save_plot:
         plt.savefig(save_path)
+        plt.clf()
         plt.close()
+        del fig, axs, axins, X, Y, target, pred
+        gc.collect()
 
     else:
         plt.show()

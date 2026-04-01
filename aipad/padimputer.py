@@ -5,15 +5,19 @@ from numpy.typing import NDArray
 from typing import Literal
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer, KNNImputer
+from scipy.interpolate import griddata
 
 
 class PADImputer(BaseEstimator, TransformerMixin):
-
-    def __init__(self, method: Literal["mean", "fill_average", "interp", "knn"] = "mean",
+    def __init__(self,
+                 method: Literal["mean", "fill_average", "interp",
+                                 "knn", "cubic"] = "mean",
                  axis: int = 1, knn_neighbors: int = 5,
-                 knn_weight: Literal["uniform", "distance"] = "uniform"):
+                 knn_weight: Literal["uniform", "distance"] = "uniform",
+                 cubic_dim: Literal[1, 2] = 1):
         self.method = method
         self.axis = axis
+        self.cubic_dim = cubic_dim
 
         self._knn_neighbors = knn_neighbors
         self._knn_weigth = knn_weight
@@ -22,7 +26,8 @@ class PADImputer(BaseEstimator, TransformerMixin):
             "mean": self._mean_finder,
             "fill_average": self._fill_average_finder,
             "interp": self._interp_finder,
-            "knn": self._knn_finder
+            "knn": self._knn_finder,
+            "cubic": self._cubic_finder,
             }
 
         self.true = None
@@ -57,6 +62,23 @@ class PADImputer(BaseEstimator, TransformerMixin):
         else:
             raise ValueError("Axis must either be 0 or 1")
 
+    def _cubic_finder(self, a: NDArray, axis: Literal[0, 1]):
+        dim = self.cubic_dim
+        X, Y = np.meshgrid(np.arange(a.shape[0]), np.arange(a.shape[1]), indexing="ij")
+        points = np.column_stack((X.ravel(), Y.ravel()))
+        values = a.ravel()
+
+        mask = np.isfinite(values)
+        points_masked = points[mask]
+        values_masked = values[mask]
+
+        if dim == 1:
+            return (pd.DataFrame(a).interpolate(method="cubic",
+                                                axis=axis, limit_direction="both")).to_numpy()
+        elif dim == 2:
+            return griddata(points_masked, values_masked,
+                            points, method='cubic').reshape(a.shape)
+
     def load_data(self):
         pass
 
@@ -64,8 +86,9 @@ class PADImputer(BaseEstimator, TransformerMixin):
     def target_from_prediction(cls, true, reduced, imputed):
         pred = np.where((np.isnan(reduced)
                         & np.isfinite(true)
-                        & np.meshgrid(np.isfinite(reduced).any(axis=1), np.arange(0, reduced.shape[1]),
-                                        indexing="ij")[0]),
+                        & np.meshgrid(np.isfinite(reduced).any(axis=1),
+                                      np.arange(0, reduced.shape[1]),
+                                      indexing="ij")[0]),
                         imputed, np.nan)
         target = np.where(np.isfinite(pred), true, np.nan)
         return target, pred
