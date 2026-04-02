@@ -11,7 +11,6 @@ import gc
 from os import PathLike
 from sklearn.impute import KNNImputer
 from sklearn.impute._base import _BaseImputer
-from sklearn.metrics import r2_score, root_mean_squared_error
 from matplotlib.colors import LogNorm, Normalize
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from matplotlib.dates import HourLocator, DateFormatter
@@ -45,7 +44,7 @@ def coverage_overlap(cov1: pd.DataFrame, cov2: pd.DataFrame):
         return cov2 & reshaped_cov1, reshaped_cov1
 
 
-def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bins: int) \
+def pad_histogram(I_data: np.ndarray, coverage: pd.DataFrame, bins: int) \
         -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Code partly adapted from SOLER anisotropy tools SEPEvent.overview_plot()
@@ -53,7 +52,6 @@ def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bins: int) \
     https://github.com/soler-he/sep_tools/tree/main/anisotropy commit 7567a98
     """
     intensity = copy.copy(I_data)
-    sectors = sc.sectors
 
     # Working with "wrong" indexing since NumPy broadcasting rules are funky
     X, Y = np.meshgrid(coverage.index.values,
@@ -65,19 +63,19 @@ def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bins: int) \
     # fill with those values between the min and max coverage,
     # and sum every sector's histogram together.
     # Could probably be written better.
-    for i, direction in enumerate(sectors):
+    for i in range(I_data.shape[1]):
         intensity_per_sector = intensity[:, i]
-        cov_arr = coverage[direction].to_numpy()
-        cov_finite = coverage[direction].notna().to_numpy()
+        cov_arr = coverage.iloc[:, i].to_numpy()
+        cov_finite = coverage.iloc[:, i].notna().to_numpy()
         av_flux = np.where(cov_finite[:, 1], intensity_per_sector, np.nan)
-        new_hist = np.where((Y > cov_arr[:, 0]) & (Y < cov_arr[:, 2]), av_flux, 0)
+        new_hist = np.where((Y > cov_arr[:, 0]) & (Y < cov_arr[:, 2]), av_flux, 0)  # The reason for working with reverse indexing
         hist = hist + new_hist
         hist_counts = hist_counts + np.where(new_hist > 0, 1, 0)   # Overlapping bins as averages
 
     hist = hist / hist_counts
     hist = np.where(hist > 0, hist, np.nan)
 
-    return X.T, Y.T, hist.T
+    return X.T, Y.T, hist.T      # Take the transpose to get correct indices
 
 
 def convert_to_bool_coverage(cov, sc, bins=8):
@@ -96,25 +94,6 @@ def convert_to_bool_coverage(cov, sc, bins=8):
             cov_arr[index] = cov_arr[index] | covered.mask
 
     return X, Y, cov_arr
-
-
-def induce_missingness(cov: pd.DataFrame, p: float, seed: int = 0) \
-        -> tuple[pd.DataFrame, np.ndarray]:
-    """Set a percentage of given coverage as missing. Returns a copy of the coverage array without
-    the randomly picked values and the missingness mask.
-
-    Args:
-        cov (pd.DataFrame): coverage with columns ("min", "center", "max") for each sector
-        p (float): proportion of data to set as missing
-    """
-    if seed == 0:   # random seed
-        random = np.random.default_rng()
-    else:
-        random = np.random.default_rng(seed)
-    mask = random.choice([False, True], size=(cov.shape[0], cov.shape[1] // 3), p=[1-p, p])
-    mask = np.repeat(mask, 3, axis=1)
-    masked_cov = cov.where(~mask, np.nan)    # DataFrame.where() replaces where condition is False
-    return masked_cov, mask
 
 
 def load_random_file(path: PathLike):
@@ -173,77 +152,6 @@ def form_test_matrices(model: _BaseImputer, X_test: NDArray,
     target = np.where(np.isfinite(pred), true, np.nan)
 
     return [true, reduced, pred_full, pred, target]
-
-
-def calculate_scores(target: np.ndarray, pred: np.ndarray, score: str) -> float:
-    """Calculate either coefficient of determination or mean square error
-    as score between prediction and target.
-
-    Args:
-        model (_BaseImputer): KNNImputer, SimpleImputer, IterativeImputer
-        true (np.ndarray): target values
-        pred (np.ndarray): predicted values
-        score (str): "r2" or "rmse"
-
-    Returns:
-        float
-    """
-
-    pred = pred.ravel()
-    target = target.ravel()
-
-    if np.any(np.isfinite(target)) and np.any(np.isfinite(pred)):
-        if score == "r2":
-            return r2_score(
-                target[np.isfinite(target)], pred[np.isfinite(pred)]
-                )
-
-        elif score == "rmse":
-            return root_mean_squared_error(
-                target[np.isfinite(target)], pred[np.isfinite(pred)]
-                )
-
-        else:
-            raise ValueError("Give a valid score!")
-    else:
-        return 0.0
-
-
-def convert_timestamps(attrs):
-    """Convert Epoch timestamps to NumPy datetime."""
-    epoch = attrs["Epoch"]
-    t_unit = attrs["t_unit"]
-    return epoch.astype(f"datetime64[{t_unit}]")
-
-
-def load_event_data(hdf, event_name, sc):
-    """Load datasets and attributes for a given event."""
-    event_group = hdf[event_name]
-
-    # Load datasets
-    intensity_attrs = dict(event_group["Intensity"].attrs)
-    intensity_attrs["Epoch"] = convert_timestamps(intensity_attrs)
-    intensity = pd.DataFrame(event_group["Intensity"][:], index=intensity_attrs["Epoch"],
-                             columns=sc.sectors)
-
-    mag_field_attrs = dict(event_group["MagField"].attrs)
-    mag_field_attrs["Epoch"] = convert_timestamps(mag_field_attrs)
-    mag_field = pd.DataFrame(event_group["MagField"][:], index=mag_field_attrs["Epoch"],
-                             columns=["Bx", "By", "Bz", "B"])
-
-    ind = pd.MultiIndex.from_product([sc.sectors, ["min", "center", "max"]])
-    coverage_attrs = dict(event_group["Coverage"].attrs)
-    coverage_attrs["Epoch"] = convert_timestamps(coverage_attrs)
-    coverage = pd.DataFrame(event_group["Coverage"][:], index=coverage_attrs["Epoch"], columns=ind)
-
-    return {
-        "Intensity": intensity,
-        "MagField": mag_field,
-        "Coverage": coverage,
-        "Intensity_attrs": intensity_attrs,
-        "MagField_attrs": mag_field_attrs,
-        "Coverage_attrs": coverage_attrs
-    }
 
 
 def target_from_prediction(true, reduced, imputed):
@@ -324,14 +232,14 @@ def plot_results(pa, I_data, B_data, true, reduced, imputed, score: str,
     vmax = np.nanmax(np.log10(np.abs(diff) + 1e-10))
     vmin = -vmax
     diff_mesh = axs[7].pcolormesh(X, Y, log_data, norm=Normalize(vmin=vmin, vmax=vmax),
-                             cmap="bwr")
+                                  cmap="bwr")
     axs[7].set_title(r"log|target - prediction| (signed)")
     axins1 = inset_axes(axs[2], width="100%", height="100%", loc="center",
-                       bbox_to_anchor=(1.01, 0, 0.03, 1), bbox_transform=axs[2].transAxes,
-                       borderpad=0.2)
+                        bbox_to_anchor=(1.01, 0, 0.03, 1), bbox_transform=axs[2].transAxes,
+                        borderpad=0.2)
     axins2 = inset_axes(axs[7], width="100%", height="100%", loc="center",
-                       bbox_to_anchor=(1.01, 0, 0.03, 1), bbox_transform=axs[7].transAxes,
-                       borderpad=0.2)
+                        bbox_to_anchor=(1.01, 0, 0.03, 1), bbox_transform=axs[7].transAxes,
+                        borderpad=0.2)
     fig.colorbar(int_mesh, cax=axins1, ax=axs[2])
     fig.colorbar(diff_mesh, cax=axins2, ax=axs[7])
     axs[7].set_yticks(np.linspace(0, 180, 9))
@@ -343,33 +251,8 @@ def plot_results(pa, I_data, B_data, true, reduced, imputed, score: str,
         plt.savefig(save_path)
         plt.clf()
         plt.close()
-        del fig, axs, axins, X, Y, target, pred
+        del fig, axs, axins1, axins2, X, Y, target, pred
         gc.collect()
 
     else:
         plt.show()
-
-
-def save_results(model, res, meta, scorer, path) -> pd.DataFrame:
-
-    reduced, pred, target = res[1], res[3], res[4]
-    score = calculate_scores(target, pred, scorer)
-    reduced_miss_percent = np.sum(np.where(np.isnan(reduced), 1, 0)) \
-        / (reduced.shape[0] * reduced.shape[1]) * 100
-    cols = ["event_dt", "miss_percent", "score", "scorer", "model_params"]
-
-    try:
-        df = pd.read_csv(path)
-    except FileNotFoundError:
-        df = pd.DataFrame(columns=cols)
-
-    row = [pd.to_datetime(meta["onset_datetime"], format="%Y%m%d-%H%M%S"),
-           reduced_miss_percent, score, scorer, (model.n_neighbors, model.weights)]
-
-    df.loc[-1] = row
-    df.index = df.index + 1
-    df = df.sort_index()
-
-    df.to_csv(path, index=False)
-
-    return df
