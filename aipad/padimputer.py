@@ -19,6 +19,9 @@ from matplotlib.dates import HourLocator, DateFormatter
 
 from aipad.pad_imputation import pad_histogram
 
+import warnings
+warnings.filterwarnings("ignore", message="divide by zero encountered in log10", category=RuntimeWarning)
+
 DEFAULT_FILE_PATH = Path("./data/hdf5")
 DEFAULT_RESULTS_PATH = Path("./results")
 DEFAULT_PLOT_PATH = Path("./plots")
@@ -34,7 +37,7 @@ def convert_timestamps(attrs):
 class PADImputer(BaseEstimator, TransformerMixin):
     def __init__(self, spacecraft, bins: int = 8,
                  method: Literal["mean", "fill_average", "interp",
-                                 "knn", "cubic"] = "mean",
+                                 "knn", "cubic1d", "cubic2d"] = "mean",
                  axis: int = 1, knn_neighbors: int = 5,
                  knn_weight: Literal["uniform", "distance"] = "uniform",
                  random_seed: int = 123):
@@ -147,7 +150,7 @@ class PADImputer(BaseEstimator, TransformerMixin):
         mask = np.repeat(mask, 3, axis=1)
         masked_cov = cov.where(~mask, np.nan)    # DataFrame.where() replaces where condition is False
         return masked_cov, mask
-    
+
     @classmethod
     def _target_and_prediction(cls, true, reduced, imputed):
         pred = np.where((np.isnan(reduced)
@@ -190,8 +193,8 @@ class PADImputer(BaseEstimator, TransformerMixin):
         else:
             return 0.0
 
-    def plot_results(self, I_data, B_data, true, reduced, imputed, score: str,
-                     save_plot=True, save_path=None) -> None:
+    def plot_results(self, I_data, B_data, true, reduced, imputed, score: str, scale,
+                     save_plot=True, show_plot=True, save_path=None) -> None:
 
         target, pred = PADImputer._target_and_prediction(true, reduced, imputed)
 
@@ -215,7 +218,7 @@ class PADImputer(BaseEstimator, TransformerMixin):
             axs[0].plot(B_data.index.values, B_data.iloc[:, b], label=B_data.columns[b])
 
         for i in range(I_data.shape[1]):
-            axs[1].plot(I_data.index.values, I_data.iloc[:, i], label=sc.sectors[i])
+            axs[1].plot(I_data.index.values, I_data.iloc[:, i], label=self.spacecraft.sectors[i])
 
         axs[0].legend(loc="upper right")
         axs[0].set_ylabel("B [nT]")
@@ -253,12 +256,21 @@ class PADImputer(BaseEstimator, TransformerMixin):
         axs[6].set_yticks(np.linspace(0, 180, 9))
         axs[6].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
-        log_data = np.sign(diff) * np.log10(np.abs(diff) + 1e-10)  # Add small offset to avoid log(0)
-        vmax = np.nanmax(np.log10(np.abs(diff) + 1e-10))
-        vmin = -vmax
-        diff_mesh = axs[7].pcolormesh(X, Y, log_data, norm=Normalize(vmin=vmin, vmax=vmax),
-                                      cmap="bwr")
-        axs[7].set_title(r"log|target - prediction| (signed)")
+        if scale is None:
+            log_data = np.sign(diff) * np.log10(np.abs(diff) + 1e-10)  # Add small offset to avoid log(0)
+            vmax = np.nanmax(np.log10(np.abs(diff) + 1e-10))
+            vmin = -vmax
+            diff_mesh = axs[7].pcolormesh(X, Y, log_data, norm=Normalize(vmin=vmin, vmax=vmax),
+                                          cmap="bwr")
+            axs[7].set_title(r"log|target - prediction| (signed)")
+
+        else:
+            vmax = np.nanmax(diff)
+            vmin = -vmax
+            diff_mesh = axs[7].pcolormesh(X, Y, diff, norm=Normalize(vmin=vmin, vmax=vmax),
+                                          cmap="bwr")
+            axs[7].set_title(r"Difference (TODO: this)")
+
         axins1 = inset_axes(axs[2], width="100%", height="100%", loc="center",
                             bbox_to_anchor=(1.01, 0, 0.03, 1), bbox_transform=axs[2].transAxes,
                             borderpad=0.2)
@@ -280,7 +292,8 @@ class PADImputer(BaseEstimator, TransformerMixin):
             gc.collect()
 
         else:
-            plt.show()
+            if not show_plot:
+                plt.show()
 
     def fit(self, X: NDArray, y: NDArray | None = None):
         return self
@@ -311,13 +324,14 @@ class PADImputer(BaseEstimator, TransformerMixin):
     def run_analysis(self, event_key, miss_pct, repeats=100,
                      scale: Literal[None, "log", "min_max"] = None,
                      save_plot: bool = True, fname: str = "plot.png",
+                     show_plot: bool = True,
                      file_path: Path = DEFAULT_FILE_PATH,
                      results_path: Path = DEFAULT_RESULTS_PATH,
                      plot_path: Path = DEFAULT_PLOT_PATH):
 
-        index = pd.MultiIndex.from_product([self.method, ["time", "pitch_angle"]],
+        index = pd.MultiIndex.from_product([[self.method], ["time", "pitch_angle"]],
                                            names=["method", "axis"])
-        columns = pd.MultiIndex.from_product([["rmse_mean", "rmse_std"], str(miss_pct)],
+        columns = pd.MultiIndex.from_product([["rmse_mean", "rmse_std"], [str(miss_pct)]],
                                              names=["stat", "miss_percent"])
 
         axis_str = "time" if self.axis == 0 else "pitch_angle"
@@ -347,7 +361,7 @@ class PADImputer(BaseEstimator, TransformerMixin):
             else:
                 intensity = I_data.values
 
-            X, Y, true = pad_histogram(intensity, cov_data, self.bins)
+            X, Y, true = pad_histogram(sc, intensity, cov_data, self.bins)
             self.true = true
             X, Y = np.meshgrid(np.arange(true.shape[0]), np.arange(true.shape[1]), indexing="ij")
             scores = []
@@ -359,7 +373,97 @@ class PADImputer(BaseEstimator, TransformerMixin):
 
             for i in range(repeats):
                 reduced_cov, mask = PADImputer._induce_missingness(cov_data, miss_pct, self._rng)
-                Xr, Yr, reduced = pad_histogram(intensity, reduced_cov, self.bins)
+                Xr, Yr, reduced = pad_histogram(sc, intensity, reduced_cov, self.bins)
+                imputed = self.transform(reduced)
+                if scale == "log":  # undo scaling for error measure calculation and plotting
+                    imputed = 10 ** imputed
+                    reduced = 10 ** reduced
+                    true_ = 10 ** true
+                elif scale == "min_max":
+                    imputed = scaler.inverse_transform(imputed)
+                    reduced = scaler.inverse_transform(reduced)
+                    true_ = scaler.inverse_transform(true)
+                else:
+                    true_ = true
+                target, pred = self._target_and_prediction(true_, reduced, imputed)
+                score = self._calculate_scores(target, pred, "rmse")
+                scores.append(score)
+
+            mean = np.mean(scores)
+            std = np.std(scores, ddof=1)
+            print(f"Event {event_key} with {miss_pct} % MCAR missingness: results using method "
+                  f"'{self.method}' along {axis_str} axis")
+            print(f"RMSE mean: {mean:.3f}")
+            print(f"RMSE std: {std:.3f}")
+
+            df.loc[(self.method, axis_str), ("rmse_mean", str(miss_pct))] = mean
+            df.loc[(self.method, axis_str), ("rmse_std", str(miss_pct))] = std
+
+            if save_plot or show_plot:
+                self.plot_results(I_data, B_data, true, reduced, imputed, "rmse", scale=scale,
+                                  save_plot=save_plot,
+                                  save_path=plot_path, show_plot=show_plot)
+
+            df.to_csv(results_path / f"{event_key}.csv")
+
+
+class KNNPadImputer(PADImputer):
+    def __init__(self, spacecraft, knn_neighbors, knn_weigth, bins=8, random_seed=123):
+        super().__init__(spacecraft=spacecraft, bins=bins, method="knn", axis=0, knn_neighbors=knn_neighbors,
+                         knn_weight=knn_weigth, random_seed=random_seed)
+
+    def run_analysis(self, event_key, miss_pct, repeats=10,
+                     scale: None | Literal['log'] | Literal['min_max'] = None,
+                     save_plot: bool = True, fname: str = "plot.png", show_plot: bool = True,
+                     file_path: Path = DEFAULT_FILE_PATH, results_path: Path = DEFAULT_RESULTS_PATH,
+                     plot_path: Path = DEFAULT_PLOT_PATH):
+
+        index = pd.MultiIndex.from_product([["knn", "knn_with_traintest"], ["time", "pitch_angle"],
+                                            ["1n", "5n", "15n", "20n"]],
+                                           names=["method", "axis", "n_neighbors"])
+        columns = pd.MultiIndex.from_product([["rmse_mean", "rmse_std"], [str(miss_pct)]],
+                                             names=["stat", "miss_percent"])
+
+        axis_str = "time" if self.axis == 0 else "pitch_angle"
+        sc = self.spacecraft
+        scaler = None
+
+        with h5py.File(file_path, 'r') as hdf:
+            try:
+                df = pd.read_csv(results_path / f"{event_key}.csv", header=[0, 1], index_col=[0, 1, 2])
+            except FileNotFoundError:
+                df = pd.DataFrame(index=index, columns=columns)
+
+            self.load_event_data(hdf, event_key, sc)
+
+            self.event_key = event_key
+
+            I_data = self.event_data["Intensity"]
+            B_data = self.event_data["MagField"]
+            cov_data = self.event_data["Coverage"]
+            # times = self.event_data["Intensity_attrs"]["Epoch"]
+
+            if scale == "min_max":
+                scaler = MinMaxScaler()
+                intensity = scaler.fit_transform(I_data.values)
+            elif scale == "log":
+                intensity = np.log10(I_data.values)
+            else:
+                intensity = I_data.values
+
+            X, Y, true = pad_histogram(sc, intensity, cov_data, self.bins)
+            self.true = true
+            X, Y = np.meshgrid(np.arange(true.shape[0]), np.arange(true.shape[1]), indexing="ij")
+            scores = []
+
+            if repeats < 10:
+                print("The analysis is repeated a number of times to better estimate the effect of "
+                      "random sampling on the score. Consider using "
+                      f"more repeats than {repeats}")
+
+            for i in range(repeats):
+                reduced_cov, mask = PADImputer._induce_missingness(cov_data, miss_pct, self._rng)
+                Xr, Yr, reduced = pad_histogram(sc, intensity, reduced_cov, self.bins)
                 imputed = self.transform(reduced)
                 target, pred = self._target_and_prediction(true, reduced, imputed)
                 score = self._calculate_scores(target, pred, "rmse")
@@ -367,13 +471,17 @@ class PADImputer(BaseEstimator, TransformerMixin):
 
             mean = np.mean(scores)
             std = np.std(scores, ddof=1)
-            print(f"Event {event_key} with {miss_pct} % MCAR missingness: results using method"
+            print(f"Event {event_key} with {miss_pct} % MCAR missingness: results using method "
                   f"'{self.method}' along {axis_str} axis")
-            print(f"Mean: {mean:.3f}")
-            print(f"Std: {std:.3f}")
+            print(f"RMSE mean: {mean:.3f}")
+            print(f"RMSE std: {std:.3f}")
 
-            df.loc[(self.method, axis_str), ("rmse_mean", str(miss_pct))] = mean
-            df.loc[(self.method, axis_str), ("rmse_std", str(miss_pct))] = std
+            df.loc[(self.method, axis_str, f"{self._knn_neighbors}n"), ("rmse_mean", str(miss_pct))] = mean
+            df.loc[(self.method, axis_str, f"{self._knn_neighbors}n"), ("rmse_std", str(miss_pct))] = std
 
-            self.plot_results(I_data, B_data, true, reduced, imputed, "rmse", save_plot=save_plot,
-                              save_path=plot_path)
+            if save_plot or show_plot:
+                self.plot_results(I_data, B_data, true, reduced, imputed, "rmse", scale=scale,
+                                  save_plot=save_plot,
+                                  save_path=plot_path, show_plot=show_plot)
+
+            df.to_csv(results_path / f"{event_key}.csv")

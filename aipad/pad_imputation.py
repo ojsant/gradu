@@ -44,7 +44,7 @@ def coverage_overlap(cov1: pd.DataFrame, cov2: pd.DataFrame):
         return cov2 & reshaped_cov1, reshaped_cov1
 
 
-def pad_histogram(I_data: np.ndarray, coverage: pd.DataFrame, bins: int) \
+def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bins: int) \
         -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Code partly adapted from SOLER anisotropy tools SEPEvent.overview_plot()
@@ -63,12 +63,12 @@ def pad_histogram(I_data: np.ndarray, coverage: pd.DataFrame, bins: int) \
     # fill with those values between the min and max coverage,
     # and sum every sector's histogram together.
     # Could probably be written better.
-    for i in range(I_data.shape[1]):
+    for i, sector in enumerate(sc.sectors):
         intensity_per_sector = intensity[:, i]
-        cov_arr = coverage.iloc[:, i].to_numpy()
-        cov_finite = coverage.iloc[:, i].notna().to_numpy()
+        cov_arr = coverage[sector].to_numpy()
+        cov_finite = coverage[sector].notna().to_numpy()
         av_flux = np.where(cov_finite[:, 1], intensity_per_sector, np.nan)
-        new_hist = np.where((Y > cov_arr[:, 0]) & (Y < cov_arr[:, 2]), av_flux, 0)  # The reason for working with reverse indexing
+        new_hist = np.where((Y > cov_arr[:, 0]) & (Y < cov_arr[:, 2]), av_flux, 0)
         hist = hist + new_hist
         hist_counts = hist_counts + np.where(new_hist > 0, 1, 0)   # Overlapping bins as averages
 
