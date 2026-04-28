@@ -6,6 +6,7 @@ import sys
 from os import PathLike
 from pathlib import Path
 from sklearn.impute import KNNImputer
+from sklearn.preprocessing import MinMaxScaler
 from aipad.spacecrafts import SoloConstants, WindConstants
 from aipad.pad_imputation import (
     pad_histogram, make_train_test)
@@ -14,26 +15,30 @@ from aipad.padimputer import PADImputer, KNNPadImputer
 import warnings
 warnings.filterwarnings("ignore", message="divide by zero encountered in log10", category=RuntimeWarning)
 
+args = sys.argv
+print(args)
+random = np.random.default_rng(seed=int(args[4]))
 
-def KNN_traintest(imputer: PADImputer, file_path: PathLike, size_pct: float, seed: int, scale="log") -> list:
+
+def load_knn_data(sc, imputer: PADImputer, file_path: PathLike, event_csv: PathLike, size_pct: float) -> list:
     trues = []
     reduceds = []
     times = []
     mags = []
     intensities = []
+    events = pd.read_csv(event_csv, header=0).values.ravel()
 
     with h5py.File(file_path, 'r') as hdf:
-        event_list = list(hdf.keys())
 
-        for event_no in range(len(event_list)):
-            imputer.load_event_data(hdf, event_list[event_no], wind)
+        for event_key in events:
+            imputer.load_event_data(hdf, event_key, sc)
             I_data = imputer.event_data["Intensity"]
             cov_data = imputer.event_data["Coverage"]
             B_data = imputer.event_data["MagField"]
             time = imputer.event_data["Intensity_attrs"]["Epoch"]
-            X, Y, true = pad_histogram(wind, np.log10(I_data.values) if scale == "log" else I_data.values, cov_data, 8)
-            reduced_cov, mask = PADImputer._induce_missingness(cov_data, size_pct, np.random.default_rng(seed))
-            X, Y, reduced = pad_histogram(wind, np.log10(I_data.values) if scale == "log" else I_data.values, reduced_cov, 8)
+            X, Y, true = pad_histogram(wind, I_data.values, cov_data, 8)
+            reduced_cov, mask = PADImputer._induce_missingness(cov_data, size_pct, random)
+            X, Y, reduced = pad_histogram(wind, I_data.values, reduced_cov, 8)
 
             trues.append(true)
             reduceds.append(reduced)
@@ -41,11 +46,8 @@ def KNN_traintest(imputer: PADImputer, file_path: PathLike, size_pct: float, see
             mags.append(B_data)
             intensities.append(I_data)
 
-    return make_train_test(trues, reduceds, times, mags, intensities, event_list)
+    return make_train_test(trues, reduceds, times, mags, intensities, events.tolist())
 
-
-args = sys.argv
-print(args)
 
 file_path = Path("./data/hdf5") / "wind_1min_8bins.h5"
 plot_path = Path("./knn_results/plots/knn_with_traintest")
@@ -59,17 +61,26 @@ neighbors = int(args[2])
 n_splits = 3
 miss_pct = int(args[1])
 size_pct = miss_pct / 100
+scale = args[3]
 pa = np.linspace(0.5*180/bins, (bins-0.5)*180/bins, bins)
 imputer = KNNImputer(n_neighbors=neighbors, weights="uniform", keep_empty_features=True)
 pad_imputer = KNNPadImputer(wind, knn_neighbors=neighbors, knn_weigth="uniform")
 (X_train, X_test, y_train, y_test, t_train, t_test,
- B_train, B_test, I_train, I_test, e_train, e_test) = KNN_traintest(pad_imputer, file_path, size_pct, 123, scale="none")
+ B_train, B_test, I_train, I_test, e_train, e_test) = load_knn_data(wind, pad_imputer, file_path,
+                                                                    Path("./events.csv"), size_pct)
 
 X_train_stacked = np.vstack(X_train)
+if scale == "min_max":
+    scaler = MinMaxScaler()
+    X_train_stacked = scaler.fit_transform(X_train_stacked)
+
+elif scale == "log":
+    X_train_stacked = np.log10(X_train_stacked)
 
 imputer.fit(X_train_stacked)
 
-for j in range(len(e_test)):
+for j in range(len(y_test)):  # Draw 30 random events without replacement
+# for j in random.choice(np.arange(55), 30, replace=False):  # Draw 30 random events without replacement
     # KNN with train test
     df = None
     event_key = e_test[j]
@@ -87,9 +98,27 @@ for j in range(len(e_test)):
                 ["rmse_mean", "rmse_std"],
                 ["10", "20", "30", "40", "50"]], names=["stat", "miss_percent"]))
 
-    true = X_test[j]
-    reduced = y_test[j]
-    imputed = imputer.transform(reduced)
+    if scale == "log":
+        true = np.log10(X_test[j])
+        reduced = np.log10(y_test[j])
+        imputed = imputer.transform(reduced)
+        true = 10 ** true
+        reduced = 10 ** reduced
+        imputed = 10 ** imputed
+
+    elif scale == "min_max":
+        true = scaler.transform(X_test[j])
+        reduced = scaler.transform(y_test[j])
+        imputed = imputer.transform(reduced)
+        true = scaler.inverse_transform(true)
+        reduced = scaler.inverse_transform(reduced)
+        imputed = scaler.inverse_transform(imputed)
+
+    else:
+        true = X_test[j]
+        reduced = y_test[j]
+        imputed = imputer.transform(reduced)
+
     target, pred = PADImputer._target_and_prediction(true, reduced, imputed)
     score = PADImputer._calculate_scores(target, pred, "rmse")
 
@@ -102,8 +131,8 @@ for j in range(len(e_test)):
     del true, reduced, imputed, target, pred
     df.to_csv(results_path / f"{event_key}.csv")
 
-    # without train test
-    pad_imputer.run_analysis(event_key, miss_pct, repeats=10, scale=None, save_plot=False,
+    pad_imputer.run_analysis(event_key, miss_pct, repeats=10, scale=scale, scaler=scaler,
+                             save_plot=False,
                              show_plot=False,
                              file_path=file_path,
                              results_path=results_path)

@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import gc
 import h5py
 
-from os import PathLike
+# from os import PathLike   TODO
 from typing import Literal
 from numpy.typing import NDArray
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -20,7 +20,8 @@ from matplotlib.dates import HourLocator, DateFormatter
 from aipad.pad_imputation import pad_histogram
 
 import warnings
-warnings.filterwarnings("ignore", message="divide by zero encountered in log10", category=RuntimeWarning)
+warnings.filterwarnings("ignore", message="divide by zero encountered in log10",
+                        category=RuntimeWarning)
 
 DEFAULT_FILE_PATH = Path("./data/hdf5")
 DEFAULT_RESULTS_PATH = Path("./results")
@@ -148,7 +149,7 @@ class PADImputer(BaseEstimator, TransformerMixin):
         p = pct / 100
         mask = rng.choice([False, True], size=(cov.shape[0], cov.shape[1] // 3), p=[1-p, p])
         mask = np.repeat(mask, 3, axis=1)
-        masked_cov = cov.where(~mask, np.nan)    # DataFrame.where() replaces where condition is False
+        masked_cov = cov.where(~mask, np.nan)  # DataFrame.where() replaces where condition is False
         return masked_cov, mask
 
     @classmethod
@@ -232,12 +233,14 @@ class PADImputer(BaseEstimator, TransformerMixin):
         axs[1].set_title("Intensities")
 
         int_mesh = axs[2].pcolormesh(X, Y, true, norm=norm, cmap="inferno")
-        axs[2].set_title(f"{self.spacecraft.name.upper()} PAD, total {true_miss_percent:.2f} % missing")
+        axs[2].set_title(f"{self.spacecraft.name.upper()} PAD, ",
+                         f"total {true_miss_percent:.2f} % missing")
         axs[2].set_yticks(np.linspace(0, 180, 9))
         axs[2].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
         axs[3].pcolormesh(X, Y, reduced, norm=norm, cmap="inferno")
-        axs[3].set_title(f"{self.spacecraft.name.upper()} PAD w/ reduction, {reduced_miss_percent:.2f} % missing")
+        axs[3].set_title(f"{self.spacecraft.name.upper()} PAD w/ reduction, ",
+                         f" {reduced_miss_percent:.2f} % missing")
         axs[3].set_yticks(np.linspace(0, 180, 9))
         axs[3].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
@@ -402,18 +405,19 @@ class PADImputer(BaseEstimator, TransformerMixin):
             if save_plot or show_plot:
                 self.plot_results(I_data, B_data, true, reduced, imputed, "rmse", scale=scale,
                                   save_plot=save_plot,
-                                  save_path=plot_path, show_plot=show_plot)
+                                  save_path=plot_path / fname, show_plot=show_plot)
 
             df.to_csv(results_path / f"{event_key}.csv")
 
 
 class KNNPadImputer(PADImputer):
     def __init__(self, spacecraft, knn_neighbors, knn_weigth, bins=8, random_seed=123):
-        super().__init__(spacecraft=spacecraft, bins=bins, method="knn", axis=0, knn_neighbors=knn_neighbors,
-                         knn_weight=knn_weigth, random_seed=random_seed)
+        super().__init__(spacecraft=spacecraft, bins=bins, method="knn", axis=0,
+                         knn_neighbors=knn_neighbors, knn_weight=knn_weigth,
+                         random_seed=random_seed)
 
     def run_analysis(self, event_key, miss_pct, repeats=10,
-                     scale: None | Literal['log'] | Literal['min_max'] = None,
+                     scale: None | Literal['log', 'min_max'] = None, scaler=None,
                      save_plot: bool = True, fname: str = "plot.png", show_plot: bool = True,
                      file_path: Path = DEFAULT_FILE_PATH, results_path: Path = DEFAULT_RESULTS_PATH,
                      plot_path: Path = DEFAULT_PLOT_PATH):
@@ -426,11 +430,11 @@ class KNNPadImputer(PADImputer):
 
         axis_str = "time" if self.axis == 0 else "pitch_angle"
         sc = self.spacecraft
-        scaler = None
 
         with h5py.File(file_path, 'r') as hdf:
             try:
-                df = pd.read_csv(results_path / f"{event_key}.csv", header=[0, 1], index_col=[0, 1, 2])
+                df = pd.read_csv(results_path / f"{event_key}.csv",
+                                 header=[0, 1], index_col=[0, 1, 2])
             except FileNotFoundError:
                 df = pd.DataFrame(index=index, columns=columns)
 
@@ -444,8 +448,11 @@ class KNNPadImputer(PADImputer):
             # times = self.event_data["Intensity_attrs"]["Epoch"]
 
             if scale == "min_max":
-                scaler = MinMaxScaler()
-                intensity = scaler.fit_transform(I_data.values)
+                if isinstance(scaler, MinMaxScaler):
+                    intensity = scaler.transform(I_data.values)
+                else:
+                    raise TypeError("pass a fitted MinMaxScaler object")
+
             elif scale == "log":
                 intensity = np.log10(I_data.values)
             else:
@@ -465,7 +472,17 @@ class KNNPadImputer(PADImputer):
                 reduced_cov, mask = PADImputer._induce_missingness(cov_data, miss_pct, self._rng)
                 Xr, Yr, reduced = pad_histogram(sc, intensity, reduced_cov, self.bins)
                 imputed = self.transform(reduced)
-                target, pred = self._target_and_prediction(true, reduced, imputed)
+                if scale == "log":  # undo scaling for error measure calculation and plotting
+                    imputed = 10 ** imputed
+                    reduced = 10 ** reduced
+                    true_ = 10 ** true
+                elif scale == "min_max":
+                    imputed = scaler.inverse_transform(imputed)
+                    reduced = scaler.inverse_transform(reduced)
+                    true_ = scaler.inverse_transform(true)
+                else:
+                    true_ = true
+                target, pred = self._target_and_prediction(true_, reduced, imputed)
                 score = self._calculate_scores(target, pred, "rmse")
                 scores.append(score)
 
@@ -476,12 +493,14 @@ class KNNPadImputer(PADImputer):
             print(f"RMSE mean: {mean:.3f}")
             print(f"RMSE std: {std:.3f}")
 
-            df.loc[(self.method, axis_str, f"{self._knn_neighbors}n"), ("rmse_mean", str(miss_pct))] = mean
-            df.loc[(self.method, axis_str, f"{self._knn_neighbors}n"), ("rmse_std", str(miss_pct))] = std
+            df.loc[(self.method, axis_str, f"{self._knn_neighbors}n"),
+                   ("rmse_mean", str(miss_pct))] = mean
+            df.loc[(self.method, axis_str, f"{self._knn_neighbors}n"),
+                   ("rmse_std", str(miss_pct))] = std
 
             if save_plot or show_plot:
                 self.plot_results(I_data, B_data, true, reduced, imputed, "rmse", scale=scale,
                                   save_plot=save_plot,
-                                  save_path=plot_path, show_plot=show_plot)
+                                  save_path=plot_path / fname, show_plot=show_plot)
 
             df.to_csv(results_path / f"{event_key}.csv")
