@@ -9,5 +9,6 @@ __pycache__
 /data/models
 /anisotropy/channels_Wind_3DP_e.csv
 /rmse_random_sampling
-
-
+/results
+/.vscode
+/no_nrmse_results

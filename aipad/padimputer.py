@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import gc
 import h5py
+from tqdm import tqdm
 
 # from os import PathLike   TODO
 from typing import Literal
@@ -17,7 +18,8 @@ from matplotlib.colors import LogNorm, Normalize
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from matplotlib.dates import HourLocator, DateFormatter
 
-from aipad.pad_imputation import pad_histogram
+from aipad.pad_imputation import calculate_PAD, convert_to_bool_coverage
+from aipad.spacecrafts import SoloConstants
 
 import warnings
 warnings.filterwarnings("ignore", message="divide by zero encountered in log10",
@@ -35,8 +37,39 @@ def convert_timestamps(attrs):
     return epoch.astype(f"datetime64[{t_unit}]")
 
 
+def unit_vector(vector):
+    """ Returns the unit vector of the vector.  """
+    return vector / np.linalg.norm(vector)
+
+
+def angle_between(v1, v2):
+    """ Returns the angle in radians between vectors 'v1' and 'v2'. """
+    v1_u = unit_vector(v1)
+    v2_u = unit_vector(v2)
+    return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
+
+
+def check_mu_sum(I_vals, mu_vals, ani):
+    mu_data_copy = mu_vals.copy()
+    mu_data_copy[np.isnan(I_vals)] = np.nan
+    if mu_data_copy.ndim == 1:
+        mu_sum = np.nansum(mu_data_copy)
+        if np.abs(mu_sum) >= 0.1:
+            ani = np.nan*ani
+    elif mu_data_copy.ndim == 2:
+        mu_sum = np.nansum(mu_data_copy, axis=1)
+        ani[np.abs(mu_sum) >= 0.1] = np.nan
+    return ani
+
+
+def anisotropy_weighted_sum(I_data, mu_data, weights):
+    ani = 3*(np.sum(I_data*mu_data*weights, axis=1)*1./np.sum(I_data*weights, axis=1))
+    ani = check_mu_sum(I_data, mu_data, ani)
+    return ani
+
+
 class PADImputer(BaseEstimator, TransformerMixin):
-    def __init__(self, spacecraft, bins: int = 8,
+    def __init__(self, spacecraft, bins: int = 8, missingness: Literal["mcar", "mar"] = "mcar",
                  method: Literal["mean", "fill_average", "interp",
                                  "knn", "cubic1d", "cubic2d"] = "mean",
                  axis: int = 1, knn_neighbors: int = 5,
@@ -47,6 +80,7 @@ class PADImputer(BaseEstimator, TransformerMixin):
         self.spacecraft = spacecraft
         self.bins = bins
         self.pa_bins = np.linspace(0.5*180/self.bins, (self.bins-0.5)*180/self.bins, self.bins)
+        self.missingness = missingness
 
         self._knn_neighbors = knn_neighbors
         self._knn_weigth = knn_weight
@@ -137,6 +171,76 @@ class PADImputer(BaseEstimator, TransformerMixin):
         }
 
     @classmethod
+    def calc_coverage(cls, mag_data, sc_like="sta", opening=None):
+        """Calculates the coverage based on given magnetic field data in GSE coordinates.
+        Options for spacecraft which to emulate at L1 are SolO and STEREO.
+
+        Args:
+            mag_data (np.ndarray): magnetic field vector time series in GSE coordinates
+            sc_like (str, optional): spacecraft which to emulate. Options are "solo" or "sta",
+                defaults to "sta"
+            opening (float, optional): detector view cone angle. Leave None for native angle.
+
+        Returns:
+            pd.DataFrame: coverage dataframe of (min, center, max) for each viewing direction
+        """
+
+        mag_vec = np.array([mag_data.Bx.to_numpy(), mag_data.By.to_numpy(), mag_data.Bz.to_numpy()])
+        if sc_like == "solo":
+            if opening is None:
+                opening = 30
+            # pointing directions of EPT in XYZ/SC coordinates (!) (arrows point into the sensor)
+            # SolO SRF == GSE if SolO were situated at L1
+            pointing_sun = np.array([-0.81915206, 0.57357645, 0.])  # "nominal Parker spiral direction"
+            pointing_asun = np.array([0.81915206, -0.57357645, 0.])
+            pointing_north = np.array([0.30301532, 0.47649285, -0.8253098])
+            pointing_south = np.array([-0.30301532, -0.47649285, 0.8253098])
+
+        elif sc_like == "sta":
+            # pointing directions of SEPT in XYZ/SC coordinates (!) (arrows point into the sensor)
+            # ecliptic == xz-plane, y points north
+            # SRF to GSE at L1: rotate -90 degrees in yz-plane
+            rot_mat = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]])
+            if opening is None:
+                opening = 52.8
+            pointing_sun = rot_mat @ np.array([-0.70710678, 0.0, -0.70710678])  # "nominal Parker spiral direction"
+            pointing_asun = rot_mat @ np.array([0.70710678, 0.0, 0.70710678])
+            pointing_north = rot_mat @ np.array([0., -1., 0.])
+            pointing_south = rot_mat @ np.array([0., 1., 0.])
+
+        pointing_arr = np.vstack((pointing_sun, pointing_asun, pointing_north, pointing_south))
+        pointing_sun = pointing_arr[0, :]
+        pointing_asun = pointing_arr[1, :]
+        pointing_north = pointing_arr[2, :]
+        pointing_south = pointing_arr[3, :]
+        pa_sun = np.ones(len(mag_data.Bx.to_numpy())) * np.nan
+        pa_asun = np.ones(len(mag_data.Bx.to_numpy())) * np.nan
+        pa_north = np.ones(len(mag_data.Bx.to_numpy())) * np.nan
+        pa_south = np.ones(len(mag_data.Bx.to_numpy())) * np.nan
+
+        for i in range(len(mag_data.Bx.to_numpy())):
+            pa_sun[i] = np.rad2deg(angle_between(pointing_sun, mag_vec[:, i]))
+            pa_asun[i] = np.rad2deg(angle_between(pointing_asun, mag_vec[:, i]))
+            pa_north[i] = np.rad2deg(angle_between(pointing_north, mag_vec[:, i]))
+            pa_south[i] = np.rad2deg(angle_between(pointing_south, mag_vec[:, i]))
+
+        sun_min = pa_sun - opening/2
+        sun_max = pa_sun + opening/2
+        asun_min = pa_asun - opening/2
+        asun_max = pa_asun + opening/2
+        north_min = pa_north - opening/2
+        north_max = pa_north + opening/2
+        south_min = pa_south - opening/2
+        south_max = pa_south + opening/2
+        cov_sun = pd.DataFrame({'min': sun_min, 'center': pa_sun, 'max': sun_max}, index=mag_data.index)
+        cov_asun = pd.DataFrame({'min': asun_min, 'center': pa_asun, 'max': asun_max}, index=mag_data.index)
+        cov_north = pd.DataFrame({'min': north_min, 'center': pa_north, 'max': north_max}, index=mag_data.index)
+        cov_south = pd.DataFrame({'min': south_min, 'center': pa_south, 'max': south_max}, index=mag_data.index)
+        keys = [('sun'), ('asun'), ('north'), ('south')]
+        coverage = pd.concat([cov_sun, cov_asun, cov_north, cov_south], keys=keys, axis=1)
+        return coverage
+
+    @classmethod
     def _induce_missingness(cls, cov: pd.DataFrame, pct: float, rng: np.random.Generator) \
             -> tuple[pd.DataFrame, np.ndarray]:
         """Set a percentage of given coverage as missing. Returns a copy of the coverage array
@@ -164,43 +268,36 @@ class PADImputer(BaseEstimator, TransformerMixin):
         return target, pred
 
     @classmethod
-    def _calculate_scores(cls, target, pred, score: str) -> float:
-        """Calculate either coefficient of determination or mean square error
-        as score between prediction and target.
+    def _calculate_scores(cls, target, pred, normalize=True) -> float:
+        """Calculate mean square error between imputation and target.
 
         Args:
-            model (_BaseImputer): KNNImputer, SimpleImputer, IterativeImputer
-            true (np.ndarray): target values
-            pred (np.ndarray): predicted values
-            score (str): "r2" or "rmse"
+            target (np.ndarray): target values
+            pred (np.ndarray): imputed values
+            normalize (bool): use range-normalized RMSE (default=True)
 
         Returns:
-            float
+            float: RMSE (or NRMSE if normalize=True)
         """
 
         if np.any(np.isfinite(target)) and np.any(np.isfinite(pred)):
-            if score == "r2":
-                return r2_score(
-                    target[np.isfinite(target)], pred[np.isfinite(pred)]
-                    )
-
-            elif score == "rmse":
+            if normalize:
                 return root_mean_squared_error(
                     target[np.isfinite(target)], pred[np.isfinite(pred)]
-                    )
-
+                    ) / (np.nanmax(target) - np.nanmin(target))
             else:
-                raise ValueError("Give a valid score!")
+                return root_mean_squared_error(
+                    target[np.isfinite(target)], pred[np.isfinite(pred)])
         else:
             return 0.0
 
-    def plot_results(self, I_data, B_data, true, reduced, imputed, score: str, scale,
+    def plot_results(self, I_data, B_data, true, reduced, imputed, normalize_RMSE, scale,
                      save_plot=True, show_plot=True, save_path=None) -> None:
 
         target, pred = PADImputer._target_and_prediction(true, reduced, imputed)
 
         # Score over whole 12 hrs
-        total_score = PADImputer._calculate_scores(target, pred, score)
+        total_score = PADImputer._calculate_scores(target, pred, normalize=normalize_RMSE)
 
         true_miss_percent = np.sum(np.where(np.isnan(true), 1, 0)) \
             / (true.shape[0] * true.shape[1]) * 100
@@ -233,33 +330,36 @@ class PADImputer(BaseEstimator, TransformerMixin):
         axs[1].set_title("Intensities")
 
         int_mesh = axs[2].pcolormesh(X, Y, true, norm=norm, cmap="inferno")
-        axs[2].set_title(f"{self.spacecraft.name.upper()} PAD, ",
+        axs[2].set_title(f"{self.spacecraft.name.upper()} PAD, " \
                          f"total {true_miss_percent:.2f} % missing")
         axs[2].set_yticks(np.linspace(0, 180, 9))
         axs[2].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
         axs[3].pcolormesh(X, Y, reduced, norm=norm, cmap="inferno")
-        axs[3].set_title(f"{self.spacecraft.name.upper()} PAD w/ reduction, ",
-                         f" {reduced_miss_percent:.2f} % missing")
+        axs[3].set_title(f"{self.spacecraft.name.upper()} PAD w/ reduction, " \
+                         f"{reduced_miss_percent:.2f} % missing")
         axs[3].set_yticks(np.linspace(0, 180, 9))
         axs[3].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
         axs[4].pcolormesh(X, Y, imputed, norm=norm, cmap="inferno")
-        axs[4].set_title("Imputed values")
+        axs[4].set_title("Completed data (true + imputation)")
         axs[4].set_yticks(np.linspace(0, 180, 9))
         axs[4].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
         axs[5].pcolormesh(X, Y, pred, norm=norm, cmap="inferno")
-        axs[5].set_title("Predicted values")
+        axs[5].set_title("Imputed values")
         axs[5].set_yticks(np.linspace(0, 180, 9))
         axs[5].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
         axs[6].pcolormesh(X, Y, target, norm=norm, cmap="inferno")
-        axs[6].set_title(f"Target values (RMSE = {total_score})")
+        if normalize_RMSE:
+            axs[6].set_title(f"Target values (NRMSE = {total_score:.2f})")
+        else:
+            axs[6].set_title(f"Target values (RMSE = {total_score:.2f})")
         axs[6].set_yticks(np.linspace(0, 180, 9))
         axs[6].set_ylabel(f"Pitch angle [{u"\u03b8"}]")
 
-        if scale is None:
+        if scale == "none":
             log_data = np.sign(diff) * np.log10(np.abs(diff) + 1e-10)  # Add small offset to avoid log(0)
             vmax = np.nanmax(np.log10(np.abs(diff) + 1e-10))
             vmin = -vmax
@@ -324,8 +424,9 @@ class PADImputer(BaseEstimator, TransformerMixin):
         self.imputed = X_imputed
         return X_imputed
 
-    def run_analysis(self, event_key, miss_pct, repeats=100,
-                     scale: Literal[None, "log", "min_max"] = None,
+    def run_analysis(self, event_key, sc_like="solo", miss_pct=10, repeats=100, opening=52.8,
+                     scale: Literal["none", "log", "min_max", "log+min_max"] = "none",
+                     normalize_rmse: bool = True,
                      save_plot: bool = True, fname: str = "plot.png",
                      show_plot: bool = True,
                      file_path: Path = DEFAULT_FILE_PATH,
@@ -338,8 +439,11 @@ class PADImputer(BaseEstimator, TransformerMixin):
                                              names=["stat", "miss_percent"])
 
         axis_str = "time" if self.axis == 0 else "pitch_angle"
-        sc = self.spacecraft
-        scaler = None
+
+        if scale == "min_max" or scale == "log+min_max":
+            scaler = MinMaxScaler()
+        else:
+            scaler = None
 
         with h5py.File(file_path, 'r') as hdf:
             try:
@@ -347,7 +451,7 @@ class PADImputer(BaseEstimator, TransformerMixin):
             except FileNotFoundError:
                 df = pd.DataFrame(index=index, columns=columns)
 
-            self.load_event_data(hdf, event_key, sc)
+            self.load_event_data(hdf, event_key, self.spacecraft)
 
             self.event_key = event_key
 
@@ -356,55 +460,66 @@ class PADImputer(BaseEstimator, TransformerMixin):
             cov_data = self.event_data["Coverage"]
             # times = self.event_data["Intensity_attrs"]["Epoch"]
 
-            if scale == "min_max":
-                scaler = MinMaxScaler()
-                intensity = scaler.fit_transform(I_data.values)
-            elif scale == "log":
-                intensity = np.log10(I_data.values)
-            else:
-                intensity = I_data.values
+            X, Y, true = calculate_PAD(self.spacecraft, I_data.values, cov_data, self.bins)
+            if self.missingness == "mar":
+                onset_dt = pd.to_datetime(event_key)
+                start_index = len(B_data[(B_data.index < onset_dt)])
+                B_data = B_data.iloc[start_index-2*60:start_index+10*60]
+                reduced_cov = PADImputer.calc_coverage(B_data, sc_like, opening=opening)
+                # TODO sc_like -> corresponding SC constants
+                Xr, Yr, reduced_cov_bool = convert_to_bool_coverage(reduced_cov, SoloConstants())
+                repeats = 1
+                reduced = np.where(reduced_cov_bool, true, np.nan)
+                reduced_miss_percent = np.sum(np.where(np.isnan(reduced), 1, 0)) \
+                / (reduced.shape[0] * reduced.shape[1]) * 100
 
-            X, Y, true = pad_histogram(sc, intensity, cov_data, self.bins)
-            self.true = true
-            X, Y = np.meshgrid(np.arange(true.shape[0]), np.arange(true.shape[1]), indexing="ij")
+            
+
             scores = []
 
-            if repeats < 10:
-                print("The analysis is repeated a number of times to better estimate the effect of "
-                      "random sampling on the score. Consider using "
-                      f"more repeats than {repeats}")
-
             for i in range(repeats):
-                reduced_cov, mask = PADImputer._induce_missingness(cov_data, miss_pct, self._rng)
-                Xr, Yr, reduced = pad_histogram(sc, intensity, reduced_cov, self.bins)
-                imputed = self.transform(reduced)
-                if scale == "log":  # undo scaling for error measure calculation and plotting
-                    imputed = 10 ** imputed
-                    reduced = 10 ** reduced
-                    true_ = 10 ** true
+                if self.missingness == "mcar":
+                    reduced_cov, mask = PADImputer._induce_missingness(cov_data, miss_pct, self._rng)
+                    Xr, Yr, reduced = calculate_PAD(self.spacecraft, I_data.values, reduced_cov, self.bins)
+                if scale == "log":
+                    reduced_ = np.log10(reduced)
+                    imputed = 10 ** self.transform(reduced_)
+
                 elif scale == "min_max":
-                    imputed = scaler.inverse_transform(imputed)
-                    reduced = scaler.inverse_transform(reduced)
-                    true_ = scaler.inverse_transform(true)
+                    reduced_ = scaler.fit_transform(reduced)
+                    imputed = scaler.inverse_transform(self.transform(reduced_))
+
+                elif scale == "log+min_max":
+                    reduced_ = scaler.fit_transform(np.log10(reduced))
+                    imputed = 10 ** scaler.inverse_transform(self.transform(reduced_))
+
                 else:
-                    true_ = true
-                target, pred = self._target_and_prediction(true_, reduced, imputed)
-                score = self._calculate_scores(target, pred, "rmse")
+                    imputed = self.transform(reduced)
+
+                target, pred = self._target_and_prediction(true, reduced, imputed)
+                score = self._calculate_scores(target, pred, normalize=normalize_rmse)
                 scores.append(score)
 
             mean = np.mean(scores)
-            std = np.std(scores, ddof=1)
-            print(f"Event {event_key} with {miss_pct} % MCAR missingness: results using method "
-                  f"'{self.method}' along {axis_str} axis")
-            print(f"RMSE mean: {mean:.3f}")
-            print(f"RMSE std: {std:.3f}")
+
+            if self.missingness == "mcar":
+                print(f"Event {event_key} with {miss_pct:.3f} % {self.missingness.upper()} missingness: results using method "
+                      f"'{self.method}' along {axis_str} axis")
+
+            elif self.missingness == "mar":
+                print(f"Event {event_key} with {reduced_miss_percent:.3f} % {self.missingness.upper()} missingness: results using method "
+                      f"'{self.method}' along {axis_str} axis")
+
+            if normalize_rmse:
+                print(f"NRMSE: {mean:.3f}")
+            else:
+                print(f"RMSE: {mean:.3f}")
 
             df.loc[(self.method, axis_str), ("rmse_mean", str(miss_pct))] = mean
-            df.loc[(self.method, axis_str), ("rmse_std", str(miss_pct))] = std
 
             if save_plot or show_plot:
-                self.plot_results(I_data, B_data, true, reduced, imputed, "rmse", scale=scale,
-                                  save_plot=save_plot,
+                self.plot_results(I_data, B_data, true, reduced, imputed,
+                                  normalize_RMSE=normalize_rmse, scale=scale, save_plot=save_plot,
                                   save_path=plot_path / fname, show_plot=show_plot)
 
             df.to_csv(results_path / f"{event_key}.csv")
@@ -416,29 +531,26 @@ class KNNPadImputer(PADImputer):
                          knn_neighbors=knn_neighbors, knn_weight=knn_weigth,
                          random_seed=random_seed)
 
-    def run_analysis(self, event_key, miss_pct, repeats=10,
-                     scale: None | Literal['log', 'min_max'] = None, scaler=None,
-                     save_plot: bool = True, fname: str = "plot.png", show_plot: bool = True,
-                     file_path: Path = DEFAULT_FILE_PATH, results_path: Path = DEFAULT_RESULTS_PATH,
+    def run_analysis(self, event_key, sc_like="solo", miss_pct=10, repeats=100, opening=52.8,
+                     scale: Literal["none", "log", "min_max", "log+min_max"] = "none",
+                     scaler=None,
+                     normalize_rmse: bool = True,
+                     save_plot: bool = True, fname: str = "plot.png",
+                     show_plot: bool = True,
+                     file_path: Path = DEFAULT_FILE_PATH,
+                     results_path: Path = DEFAULT_RESULTS_PATH,
                      plot_path: Path = DEFAULT_PLOT_PATH):
 
-        index = pd.MultiIndex.from_product([["knn", "knn_with_traintest"], ["time", "pitch_angle"],
-                                            ["1n", "5n", "15n", "20n"]],
-                                           names=["method", "axis", "n_neighbors"])
-        columns = pd.MultiIndex.from_product([["rmse_mean", "rmse_std"], [str(miss_pct)]],
-                                             names=["stat", "miss_percent"])
-
         axis_str = "time" if self.axis == 0 else "pitch_angle"
-        sc = self.spacecraft
 
         with h5py.File(file_path, 'r') as hdf:
             try:
-                df = pd.read_csv(results_path / f"{event_key}.csv",
-                                 header=[0, 1], index_col=[0, 1, 2])
+                df = pd.read_csv(results_path / f"{event_key}.csv", header=[0, 1], index_col=[0, 1])
             except FileNotFoundError:
-                df = pd.DataFrame(index=index, columns=columns)
+                df = pd.DataFrame(index=pd.MultiIndex.from_product([[], []], names=["method", "n_neighbors"]),
+                                  columns=pd.MultiIndex.from_product([[], []], names=["miss_percent", "scale"]))
 
-            self.load_event_data(hdf, event_key, sc)
+            self.load_event_data(hdf, event_key, self.spacecraft)
 
             self.event_key = event_key
 
@@ -446,60 +558,68 @@ class KNNPadImputer(PADImputer):
             B_data = self.event_data["MagField"]
             cov_data = self.event_data["Coverage"]
             # times = self.event_data["Intensity_attrs"]["Epoch"]
+            
+            X, Y, true = calculate_PAD(self.spacecraft, I_data.values, cov_data, self.bins)
 
-            if scale == "min_max":
-                if isinstance(scaler, MinMaxScaler):
-                    intensity = scaler.transform(I_data.values)
-                else:
-                    raise TypeError("pass a fitted MinMaxScaler object")
-
-            elif scale == "log":
-                intensity = np.log10(I_data.values)
-            else:
-                intensity = I_data.values
-
-            X, Y, true = pad_histogram(sc, intensity, cov_data, self.bins)
-            self.true = true
             X, Y = np.meshgrid(np.arange(true.shape[0]), np.arange(true.shape[1]), indexing="ij")
+
+            if self.missingness == "mar":
+                onset_dt = pd.to_datetime(event_key)
+                start_index = len(B_data[(B_data.index < onset_dt)])
+                B_data = B_data.iloc[start_index-2*60:start_index+10*60]
+                reduced_cov = PADImputer.calc_coverage(B_data, sc_like, opening=opening)
+                # TODO sc_like -> corresponding SC constants
+                Xr, Yr, reduced_cov_bool = convert_to_bool_coverage(reduced_cov, SoloConstants())
+                repeats = 1
+                reduced = np.where(reduced_cov_bool, true, np.nan)
+                reduced_miss_percent = np.sum(np.where(np.isnan(reduced), 1, 0)) \
+                / (reduced.shape[0] * reduced.shape[1]) * 100
+
             scores = []
 
-            if repeats < 10:
-                print("The analysis is repeated a number of times to better estimate the effect of "
-                      "random sampling on the score. Consider using "
-                      f"more repeats than {repeats}")
-
             for i in range(repeats):
-                reduced_cov, mask = PADImputer._induce_missingness(cov_data, miss_pct, self._rng)
-                Xr, Yr, reduced = pad_histogram(sc, intensity, reduced_cov, self.bins)
-                imputed = self.transform(reduced)
-                if scale == "log":  # undo scaling for error measure calculation and plotting
-                    imputed = 10 ** imputed
-                    reduced = 10 ** reduced
-                    true_ = 10 ** true
+                if self.missingness == "mcar":
+                    reduced_cov, mask = PADImputer._induce_missingness(cov_data, miss_pct, self._rng)
+                    Xr, Yr, reduced = calculate_PAD(self.spacecraft, I_data.values, reduced_cov, self.bins)
+                if scale == "log":
+                    reduced_ = np.log10(reduced)
+                    imputed = 10 ** self.transform(reduced_)
+
                 elif scale == "min_max":
-                    imputed = scaler.inverse_transform(imputed)
-                    reduced = scaler.inverse_transform(reduced)
-                    true_ = scaler.inverse_transform(true)
+                    reduced_ = scaler.transform(reduced)
+                    imputed = scaler.inverse_transform(self.transform(reduced_))
+
+                elif scale == "log+min_max":
+                    reduced_ = scaler.transform(np.log10(reduced))
+                    imputed = 10 ** scaler.inverse_transform(self.transform(reduced_))
+
                 else:
-                    true_ = true
-                target, pred = self._target_and_prediction(true_, reduced, imputed)
-                score = self._calculate_scores(target, pred, "rmse")
+                    imputed = self.transform(reduced)
+
+                target, pred = self._target_and_prediction(true, reduced, imputed)
+                score = self._calculate_scores(target, pred, normalize=normalize_rmse)
                 scores.append(score)
 
             mean = np.mean(scores)
-            std = np.std(scores, ddof=1)
-            print(f"Event {event_key} with {miss_pct} % MCAR missingness: results using method "
-                  f"'{self.method}' along {axis_str} axis")
-            print(f"RMSE mean: {mean:.3f}")
-            print(f"RMSE std: {std:.3f}")
 
-            df.loc[(self.method, axis_str, f"{self._knn_neighbors}n"),
-                   ("rmse_mean", str(miss_pct))] = mean
-            df.loc[(self.method, axis_str, f"{self._knn_neighbors}n"),
-                   ("rmse_std", str(miss_pct))] = std
+            if self.missingness == "mcar":
+                print(f"Event {event_key} with {miss_pct:.3f} % {self.missingness.upper()} missingness: results using method "
+                      f"'{self.method}' along {axis_str} axis")
+
+            elif self.missingness == "mar":
+                print(f"Event {event_key} with {reduced_miss_percent:.3f} % {self.missingness.upper()} missingness: results using method "
+                      f"'{self.method}' along {axis_str} axis")
+
+            if normalize_rmse:
+                print(f"NRMSE: {mean:.3f}")
+            else:
+                print(f"RMSE: {mean:.3f}")
+
+            df.loc[(self.method, self._knn_neighbors),
+                   (str(miss_pct), scale)] = mean
 
             if save_plot or show_plot:
-                self.plot_results(I_data, B_data, true, reduced, imputed, "rmse", scale=scale,
+                self.plot_results(I_data, B_data, true, reduced, imputed, normalize_RMSE=normalize_rmse, scale=scale,
                                   save_plot=save_plot,
                                   save_path=plot_path / fname, show_plot=show_plot)
 

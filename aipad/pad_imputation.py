@@ -2,22 +2,14 @@
 # preprocessing related to preprocessing
 
 import numpy as np
-import os
 import pandas as pd
-import matplotlib.pyplot as plt
 import copy
-import gc
 
-from os import PathLike
 from sklearn.impute import KNNImputer
 from sklearn.impute._base import _BaseImputer
-from matplotlib.colors import LogNorm, Normalize
-from mpl_toolkits.axes_grid1.inset_locator import inset_axes
-from matplotlib.dates import HourLocator, DateFormatter
 from numpy.typing import NDArray
 
 from anisotropy import run_SEPevent
-from aipad.spacecrafts import SoloConstants, WindConstants
 
 
 # TODO: there still needs to be a better way to handle shape mismatches.
@@ -44,7 +36,7 @@ def coverage_overlap(cov1: pd.DataFrame, cov2: pd.DataFrame):
         return cov2 & reshaped_cov1, reshaped_cov1
 
 
-def pad_histogram(sc, I_data: np.ndarray, coverage: pd.DataFrame, bins: int) \
+def calculate_PAD(sc, I_data: np.ndarray, coverage: pd.DataFrame, bins: int) \
         -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Code partly adapted from SOLER anisotropy tools SEPEvent.overview_plot()
@@ -94,11 +86,6 @@ def convert_to_bool_coverage(cov, sc, bins=8):
             cov_arr[index] = cov_arr[index] | covered.mask
 
     return X, Y, cov_arr
-
-
-def load_random_file(path: PathLike):
-    r_file = np.random.choice(os.listdir(path)).tolist()
-    return np.load(path / r_file)
 
 
 def load_wind_event(*args, remove_peaks=False, n_lim=2, **kwargs):
@@ -152,14 +139,3 @@ def form_test_matrices(model: _BaseImputer, X_test: NDArray,
     target = np.where(np.isfinite(pred), true, np.nan)
 
     return [true, reduced, pred_full, pred, target]
-
-
-def target_from_prediction(true, reduced, imputed):
-    pred = np.where((np.isnan(reduced)
-                    & np.isfinite(true)
-                    & np.meshgrid(np.isfinite(reduced).any(axis=1), np.arange(0, reduced.shape[1]),
-                                  indexing="ij")[0]),
-                    imputed, np.nan)
-    target = np.where(np.isfinite(pred), true, np.nan)
-    return target, pred
-
